@@ -64,6 +64,7 @@ class Balance:
 
 @dataclass(frozen=True)
 class OrderSnapshot:
+    inst_id: str
     cl_ord_id: str
     ord_id: str
     state: str  # live | partially_filled | filled | canceled | mmp_canceled
@@ -97,6 +98,7 @@ def _ts() -> str:
 
 def _snapshot(o: dict[str, Any]) -> OrderSnapshot:
     return OrderSnapshot(
+        inst_id=o.get("instId", ""),
         cl_ord_id=o.get("clOrdId", ""),
         ord_id=o.get("ordId", ""),
         state=o["state"],
@@ -210,11 +212,14 @@ class OkxRest:
             raise
         return _snapshot(d)
 
-    async def pending_orders(self, inst_id: str) -> list[OrderSnapshot]:
+    async def pending_orders(self, inst_id: str | None = None) -> list[OrderSnapshot]:
+        """All resting SPOT orders, or only those on `inst_id`."""
         out: list[OrderSnapshot] = []
         after = ""
         while True:
-            params = {"instType": "SPOT", "instId": inst_id, "limit": "100"}
+            params = {"instType": "SPOT", "limit": "100"}
+            if inst_id:
+                params["instId"] = inst_id
             if after:
                 params["after"] = after
             data = await self._request("GET", "/api/v5/trade/orders-pending", params)
@@ -243,7 +248,7 @@ class WsOrderUpdate:
 
 
 async def private_orders_stream(
-    creds: Credentials, inst_id: str, url: str = WS_PRIVATE, on_connect: Callable[[], Awaitable[None]] | None = None
+    creds: Credentials, inst_ids: list[str], url: str = WS_PRIVATE, on_connect: Callable[[], Awaitable[None]] | None = None
 ) -> AsyncIterator[WsOrderUpdate]:
     """Yields order updates forever, reconnecting with backoff. `on_connect` runs after every (re)subscribe."""
     backoff = 1.0
@@ -258,11 +263,13 @@ async def private_orders_stream(
                 resp = json.loads(await asyncio.wait_for(ws.recv(), 15))
                 if resp.get("event") != "login" or resp.get("code") != "0":
                     raise OkxError(str(resp.get("code")), f"ws login failed: {resp}")
-                await ws.send(json.dumps({"op": "subscribe", "args": [{"channel": "orders", "instType": "SPOT", "instId": inst_id}]}))
-                resp = json.loads(await asyncio.wait_for(ws.recv(), 15))
-                if resp.get("event") != "subscribe":
-                    raise OkxError(str(resp.get("code")), f"ws subscribe failed: {resp}")
-                log.info("ws connected and subscribed to orders %s", inst_id)
+                args = [{"channel": "orders", "instType": "SPOT", "instId": i} for i in inst_ids]
+                await ws.send(json.dumps({"op": "subscribe", "args": args}))
+                for _ in args:  # one ack per channel
+                    resp = json.loads(await asyncio.wait_for(ws.recv(), 15))
+                    if resp.get("event") != "subscribe":
+                        raise OkxError(str(resp.get("code")), f"ws subscribe failed: {resp}")
+                log.info("ws connected and subscribed to orders %s", ",".join(inst_ids))
                 backoff = 1.0
                 if on_connect is not None:
                     await on_connect()

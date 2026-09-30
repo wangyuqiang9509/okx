@@ -165,3 +165,40 @@ def test_cl_ord_id_is_alnum_and_short():
     eng, actions = seeded_engine()
     for a in actions:
         assert a.order.cl_ord_id.isalnum() and len(a.order.cl_ord_id) <= 32
+
+
+def test_out_of_order_sell_fills_defer_instead_of_failing():
+    """Price sweeps up through L-1 and L0 but the L0 fill is reported first."""
+    eng, _ = seeded_engine()
+    eng.on_fill(buy_fill(eng.levels[-1], "b1"))  # sell now at L0
+    eng.on_fill(buy_fill(eng.levels[-2], "b2"))  # sell now at L-1
+    sell_l0 = eng.levels[0]
+    sell_lm1 = eng.levels[-1]
+    assert sell_l0.side is Side.SELL and sell_lm1.side is Side.SELL
+    acts = eng.on_fill(sell_fill(sell_l0, "s0"))  # L0 first: its buy-back belongs at L-1, still held
+    assert [type(a) for a in acts] == [GridProfitRealised]
+    assert len(eng.deferred) == 1 and eng.deferred[0].idx == -1
+    acts = eng.on_fill(sell_fill(sell_lm1, "s1"))  # now L-1 frees: deferred buy takes it
+    placed = [a.order for a in acts if isinstance(a, PlaceOrder)]
+    assert {(o.idx, o.side) for o in placed} == {(-1, Side.BUY), (-2, Side.BUY)}
+    assert eng.deferred == []
+    assert eng.levels[-1].side is Side.BUY and eng.levels[-2].side is Side.BUY
+
+
+def test_out_of_order_buy_fills_defer_instead_of_failing():
+    """Price sweeps down through L-1 and L-2 but the L-2 fill is reported first."""
+    eng, _ = seeded_engine()
+    b1, b2 = eng.levels[-1], eng.levels[-2]
+    acts = eng.on_fill(buy_fill(b2, "b2"))  # its sell belongs at L-1, still held by b1
+    assert acts == [] and len(eng.deferred) == 1
+    acts = eng.on_fill(buy_fill(b1, "b1"))
+    placed = {(a.order.idx, a.order.side) for a in acts if isinstance(a, PlaceOrder)}
+    assert placed == {(-1, Side.SELL), (0, Side.SELL)}
+    assert eng.deferred == []
+
+
+def test_deferred_orders_survive_state_round_trip():
+    eng, _ = seeded_engine()
+    eng.on_fill(buy_fill(eng.levels[-2], "b2"))
+    clone = GridEngine.from_state(eng.state_dict())
+    assert len(clone.deferred) == 1 and clone.state_dict() == eng.state_dict()

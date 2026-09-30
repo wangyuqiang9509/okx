@@ -27,36 +27,56 @@ class RuntimeConfig:
 
 @dataclass(frozen=True)
 class Config:
-    grid: GridConfig
+    grids: tuple[GridConfig, ...]
     runtime: RuntimeConfig
     path: Path
+
+    def grid_for(self, inst_id: str) -> GridConfig:
+        for g in self.grids:
+            if g.inst_id == inst_id:
+                return g
+        raise KeyError(f"{inst_id} is not configured in {self.path}")
 
 
 def load_config(path: str | Path) -> Config:
     p = Path(path)
     with p.open("rb") as f:
         raw = tomllib.load(f)
-    g = raw["grid"]
+    # `[grid]` (one table) or `[[grids]]` (array of tables)
+    raw_grids = raw.get("grids") or ([raw["grid"]] if "grid" in raw else [])
+    if not raw_grids:
+        raise ValueError(f"{p}: no [grid] or [[grids]] section")
+    grids = tuple(_grid(g) for g in raw_grids)
+    insts = [g.inst_id for g in grids]
+    if len(set(insts)) != len(insts):
+        raise ValueError(f"{p}: an instrument appears twice: {insts}")
+    quotes = {g.inst_id.split("-")[1] for g in grids}
+    if len(quotes) != 1:
+        raise ValueError(f"{p}: all grids must share one quote currency, got {quotes}")
     r = raw["runtime"]
-    grid = GridConfig(
-        inst_id=str(g["inst_id"]),
-        capital_quote=Decimal(str(g["capital_quote"])),
-        spacing=Decimal(str(g["spacing_pct"])) / Decimal(100),
-        levels_below=int(g["levels_below"]),
-        levels_above=int(g["levels_above"]),
-        seed_slippage=Decimal(str(g.get("seed_slippage_pct", "0.1"))) / Decimal(100),
-    )
-    if grid.levels_below < 1 or grid.levels_above < 1:
-        raise ValueError("levels_below and levels_above must both be >= 1")
-    if grid.spacing <= 0:
-        raise ValueError("spacing must be positive")
     runtime = RuntimeConfig(
         ledger_path=Path(r.get("ledger_path", "data/gridbot.sqlite")),
         log_dir=Path(r.get("log_dir", "data/logs")),
         reconcile_interval_s=int(r.get("reconcile_interval_s", 3600)),
         snapshot_interval_s=int(r.get("snapshot_interval_s", 300)),
     )
-    return Config(grid=grid, runtime=runtime, path=p)
+    return Config(grids=grids, runtime=runtime, path=p)
+
+
+def _grid(g: dict[str, object]) -> GridConfig:
+    grid = GridConfig(
+        inst_id=str(g["inst_id"]),
+        capital_quote=Decimal(str(g["capital_quote"])),
+        spacing=Decimal(str(g["spacing_pct"])) / Decimal(100),
+        levels_below=int(str(g["levels_below"])),
+        levels_above=int(str(g["levels_above"])),
+        seed_slippage=Decimal(str(g.get("seed_slippage_pct", "0.1"))) / Decimal(100),
+    )
+    if grid.levels_below < 1 or grid.levels_above < 1:
+        raise ValueError(f"{grid.inst_id}: levels_below and levels_above must both be >= 1")
+    if grid.spacing <= 0:
+        raise ValueError(f"{grid.inst_id}: spacing must be positive")
+    return grid
 
 
 @dataclass(frozen=True)

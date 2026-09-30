@@ -1,5 +1,12 @@
-# Day-1 validation grid: 50 USDT, dense ±3% / 0.3%. Purpose is to exercise code paths, not profit.
-[grid]
+# Validation grids: small capital, dense spacing, to exercise code paths on each coin.
+# The BTC grid was created 2026-09-30 with these values and is resumed as is.
+[runtime]
+ledger_path = "data/gridbot.sqlite"
+log_dir = "data/logs"
+reconcile_interval_s = 3600
+snapshot_interval_s = 300
+
+[[grids]]
 inst_id = "BTC-USDT"
 capital_quote = 50
 spacing_pct = 0.3
@@ -7,8 +14,18 @@ levels_below = 10
 levels_above = 10
 seed_slippage_pct = 0.1
 
-[runtime]
-ledger_path = "data/gridbot.sqlite"
-log_dir = "data/logs"
-reconcile_interval_s = 3600
-snapshot_interval_s = 300
+[[grids]]
+inst_id = "ETH-USDT"
+capital_quote = 25
+spacing_pct = 0.6
+levels_below = 8
+levels_above = 8
+seed_slippage_pct = 0.1
+
+[[grids]]
+inst_id = "SOL-USDT"
+capital_quote = 25
+spacing_pct = 0.6
+levels_below = 8
+levels_above = 8
+seed_slippage_pct = 0.1

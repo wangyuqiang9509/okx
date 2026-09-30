@@ -209,6 +209,9 @@ class GridEngine:
         self.round_trips = 0
         self.seq = 0
         self.unplaced: set[str] = set()  # intents not yet on the exchange (Halt, errors)
+        # Counter-orders whose Level is still held by an order that has filled on the exchange
+        # but whose fill we have not processed yet (fills reported out of price order).
+        self.deferred: list[Order] = []
 
     # ----- ids -------------------------------------------------------------
     def new_cl_ord_id(self, side: Side, idx: int) -> str:
@@ -252,21 +255,41 @@ class GridEngine:
                 raise EngineError(f"seed base {self.seed.base_flow} too small for {n_above} sell levels")
             basis_each = self.seed.quote_flow / n_above
             for idx in range(1, n_above + 1):
-                actions.append(self._new_order(idx, Side.SELL, sell_qty, basis_each, self.seed.cl_ord_id))
+                actions.append(self._must(self._new_order(idx, Side.SELL, sell_qty, basis_each, self.seed.cl_ord_id)))
         for idx in range(-self.spec.levels_below, 0):
-            actions.append(self._new_order(idx, Side.BUY, self.spec.qty))
+            actions.append(self._must(self._new_order(idx, Side.BUY, self.spec.qty)))
         return actions
+
+    @staticmethod
+    def _must(p: PlaceOrder | None) -> PlaceOrder:
+        if p is None:
+            raise EngineError("initial level unexpectedly occupied")
+        return p
 
     def _new_order(
         self, idx: int, side: Side, qty: D, basis_quote: D = ZERO, basis_id: str = ""
-    ) -> PlaceOrder:
-        if self.levels.get(idx, "missing") is not None:
-            raise EngineError(f"level {idx} already occupied or out of range")
+    ) -> PlaceOrder | None:
+        """Occupy Level `idx` with a new order, or defer it if the Level is still held."""
+        if idx not in self.levels:
+            raise EngineError(f"level {idx} out of range")
         order = Order(
             self.new_cl_ord_id(side, idx), idx, side, self.spec.price(idx), qty, basis_quote, basis_id
         )
+        if self.levels[idx] is not None:
+            self.deferred.append(order)
+            return None
         self.levels[idx] = order
         return PlaceOrder(order)
+
+    def _release(self, idx: int) -> list[Action]:
+        """Level `idx` just freed: hand it to the first order deferred for it, if any."""
+        self.levels[idx] = None
+        for i, o in enumerate(self.deferred):
+            if o.idx == idx:
+                del self.deferred[i]
+                self.levels[idx] = o
+                return [PlaceOrder(o)]
+        return []
 
     # ----- events ----------------------------------------------------------
     def on_fill(self, fill: Fill) -> list[Action]:
@@ -341,18 +364,21 @@ class GridEngine:
         self.unplaced.discard(order.cl_ord_id)
         if order is self.seed:
             return []
-        self.levels[order.idx] = None
+        actions: list[Action] = list(self._release(order.idx))
         if order.side is Side.BUY:
             sell_qty = quantize_down(order.base_flow, self.spec.lot_sz)
             if sell_qty < self.spec.min_sz:
                 raise EngineError(f"buy {order.cl_ord_id} yielded {order.base_flow}, below min size")
-            return [self._new_order(order.idx + 1, Side.SELL, sell_qty, order.quote_flow, order.cl_ord_id)]
+            p = self._new_order(order.idx + 1, Side.SELL, sell_qty, order.quote_flow, order.cl_ord_id)
+            return actions + ([p] if p else [])
         profit = order.quote_flow - order.basis_quote
         self.realised_profit += profit
         self.round_trips += 1
-        actions: list[Action] = [GridProfitRealised(order, profit)]
+        actions.insert(0, GridProfitRealised(order, profit))
         if order.idx - 1 >= -self.spec.levels_below:
-            actions.append(self._new_order(order.idx - 1, Side.BUY, self.spec.qty))
+            p = self._new_order(order.idx - 1, Side.BUY, self.spec.qty)
+            if p:
+                actions.append(p)
         return actions
 
     # ----- derived -----------------------------------------------------------
@@ -377,6 +403,7 @@ class GridEngine:
             "round_trips": self.round_trips,
             "seq": self.seq,
             "unplaced": sorted(self.unplaced),
+            "deferred": [o.to_dict() for o in self.deferred],
         }
 
     @classmethod
@@ -390,4 +417,5 @@ class GridEngine:
         eng.round_trips = int(d["round_trips"])
         eng.seq = int(d["seq"])
         eng.unplaced = set(d["unplaced"])
+        eng.deferred = [Order.from_dict(o) for o in d.get("deferred", [])]
         return eng

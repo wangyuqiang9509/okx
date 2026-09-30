@@ -1,23 +1,23 @@
-# OKX BTC Grid Bot
+# OKX Grid Bot
 
-一个自用的、在 OKX 现货 BTC-USDT 上运行固定区间网格的交易机器人：把一段价格区间切成若干格，每格常驻一张限价单，低买高卖赚取震荡差价。价格离开区间后不追、不止损，最差情形是满仓持有 BTC。
+一个自用的、在 OKX 现货上同时运行多个固定区间网格的交易机器人（目前 BTC、ETH、SOL 各一个，均以 USDT 计价）：把一段价格区间切成若干格，每格常驻一张限价单，低买高卖赚取震荡差价。价格离开区间后不追、不止损，最差情形是满仓持有该币。
 
 ## Language
 
 ### 市场与标的
 
 **Instrument（标的）**:
-OKX 上一个可交易的现货交易对，以 OKX 的 instId 为唯一标识。当前只有 BTC-USDT。
+OKX 上一个可交易的现货交易对，以 OKX 的 instId 为唯一标识。每个 Instrument 同一时刻至多一个开着的 Grid；所有 Instrument 共用同一种计价币。
 _Avoid_: symbol, pair, ticker, 币种
 
 ### 网格
 
 **Grid（网格）**:
-一个固定的价格区间被切成若干 Level 的整体。区间在启动时确定，运行中不移动；价格离开区间后 Grid 不再产生新的 Order，直到人工重设。
+一个 Instrument 上、一个固定的价格区间被切成若干 Level 的整体。区间在启动时确定，运行中不移动；价格离开区间后 Grid 不再产生新的 Order，直到人工重设。
 _Avoid_: strategy, 策略, bot, 机器人
 
 **Level（格）**:
-Grid 内的一个价格点。任一时刻每个 Level 上要么挂着一张 Order，要么刚成交、等待在相邻 Level 补挂对侧 Order。
+Grid 内的一个价格点。任一时刻每个 Level 上至多一张 Order。成交回报乱序到达时，要挂到仍被占用的 Level 上的对侧 Order 会先暂存，等该 Level 腾出后再挂出。
 _Avoid_: line, 网格线, step, tick
 
 **Lower Bound / Upper Bound（下沿 / 上沿）**:
@@ -39,11 +39,15 @@ _Avoid_: PnL, 收益, 盈利, 套利
 ### 账户
 
 **Equity（权益）**:
-账户以 USDT 计价的总价值：USDT 余额加上 BTC Position 按最新价折算的价值。
+一个 Grid 以计价币计算的总价值：它的计价币余额加上 Position 按最新价折算的价值。
 _Avoid_: balance, NAV, 净值, 总资产
 
 **Position（仓位）**:
-平台持有的 BTC 数量，非负。
+某个 Grid 持有的基础币数量，非负。
+
+**Account Pool（账户池）**:
+账户里不属于任何开着的 Grid 的资金，按币种记账。创建 Grid 时从中划出本金，关闭 Grid 时剩余资金归还给它。账户实际余额必须等于账户池加上所有开着的 Grid 所持有的量，否则就是对账差异。
+_Avoid_: idle funds, 闲钱, 余额, offset
 _Avoid_: holding, 持仓, balance
 
 ### 执行与账本
@@ -61,7 +65,7 @@ _Avoid_: execution, trade, 成交回报
 _Avoid_: database, history, 流水
 
 **Reconciliation（对账）**:
-把 Ledger 推导出的 Position 和 Grid 状态与 OKX 账户实际余额、未成交订单做比对并处理差异的过程。OKX 是事实来源，Ledger 只是历史。
+把 Ledger 推导出的各 Grid 状态和 Account Pool 与 OKX 账户实际余额、未成交订单做比对并处理差异的过程。OKX 是事实来源，Ledger 只是历史。计价币对不上时所有 Grid 一起 Halt，某个基础币对不上时只 Halt 对应的 Grid。
 _Avoid_: sync, 同步
 
 **Halt（停机）**:

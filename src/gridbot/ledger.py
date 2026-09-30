@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT, grid_id TEXT, ts_ms INTEGER, quote TEXT, base TEXT, last_px TEXT, equity TEXT, realised TEXT
 );
+CREATE TABLE IF NOT EXISTS account_pool (
+  ccy TEXT PRIMARY KEY, amount TEXT, updated_ms INTEGER
+);
 CREATE INDEX IF NOT EXISTS events_grid_ts ON events (grid_id, ts_ms);
 CREATE INDEX IF NOT EXISTS fills_grid_ts ON fills (grid_id, ts_ms);
 """
@@ -48,19 +51,75 @@ class Ledger:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(grids)")}
+        if "inst_id" not in cols:
+            self.db.execute("ALTER TABLE grids ADD COLUMN inst_id TEXT")
+            self.db.execute("UPDATE grids SET inst_id = json_extract(spec_json, '$.inst_id')")
+        # v1 kept a per-grid offset; v2 keeps one account-level pool of funds no grid owns.
+        if self.pool() == {}:
+            open_rows = self.open_grids()
+            if len(open_rows) == 1:
+                row = open_rows[0]
+                spec = json.loads(row["spec_json"])
+                base_ccy, quote_ccy = spec["inst_id"].split("-")
+                self.pool_set(quote_ccy, D(row["quote_offset"]))
+                self.pool_set(base_ccy, D(row["base_offset"]))
 
     def close(self) -> None:
         self.db.close()
 
     # ----- grids ------------------------------------------------------------------
-    def create_grid(self, grid_id: str, config_path: str, spec: dict[str, Any], state: dict[str, Any], quote_offset: D, base_offset: D) -> None:
+    def create_grid(self, grid_id: str, config_path: str, spec: dict[str, Any], state: dict[str, Any]) -> None:
         self.db.execute(
-            "INSERT INTO grids VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (grid_id, now_ms(), "active", "", config_path, json.dumps(spec), json.dumps(state), str(quote_offset), str(base_offset), now_ms()),
+            "INSERT INTO grids (id, created_ms, status, halt_reason, config_path, spec_json, state_json, quote_offset, base_offset, updated_ms, inst_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (grid_id, now_ms(), "active", "", config_path, json.dumps(spec), json.dumps(state), "", "", now_ms(), spec["inst_id"]),
         )
 
-    def open_grid(self) -> sqlite3.Row | None:
-        return cast(sqlite3.Row | None, self.db.execute("SELECT * FROM grids WHERE status IN ('active','halted') ORDER BY created_ms DESC LIMIT 1").fetchone())
+    def open_grid(self, inst_id: str | None = None) -> sqlite3.Row | None:
+        a: tuple[str, ...]
+        if inst_id is None:
+            q, a = "SELECT * FROM grids WHERE status IN ('active','halted') ORDER BY created_ms DESC LIMIT 1", ()
+        else:
+            q, a = "SELECT * FROM grids WHERE status IN ('active','halted') AND inst_id=? ORDER BY created_ms DESC LIMIT 1", (inst_id,)
+        return cast(sqlite3.Row | None, self.db.execute(q, a).fetchone())
+
+    def open_grids(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM grids WHERE status IN ('active','halted') ORDER BY created_ms").fetchall()
+
+    # ----- account pool: funds in the account that belong to no open grid ----------------
+    def pool(self) -> dict[str, D]:
+        return {r["ccy"]: D(r["amount"]) for r in self.db.execute("SELECT * FROM account_pool")}
+
+    def pool_set(self, ccy: str, amount: D) -> None:
+        self.db.execute("INSERT OR REPLACE INTO account_pool VALUES (?,?,?)", (ccy, str(amount), now_ms()))
+
+    def pool_add(self, ccy: str, delta: D) -> None:
+        self.pool_set(ccy, self.pool().get(ccy, D(0)) + delta)
+
+    def close_grid(self, grid_id: str, reason: str) -> tuple[D, D]:
+        """Mark closed and hand the grid's remaining cash and base back to the pool, atomically."""
+        row = self.grid(grid_id)
+        assert row is not None
+        if row["status"] == "closed":
+            return D(0), D(0)
+        state = json.loads(row["state_json"])
+        base_ccy, quote_ccy = state["base_ccy"], state["quote_ccy"]
+        cash, base = D(state["cash_quote"]), D(state["base_held"])
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.pool_add(quote_ccy, cash)
+            self.pool_add(base_ccy, base)
+            self.db.execute("UPDATE grids SET status='closed', halt_reason=?, updated_ms=? WHERE id=?", (reason, now_ms(), grid_id))
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+        self.event(grid_id, "status", {"status": "closed", "reason": reason, "released_quote": str(cash), "released_base": str(base)})
+        return cash, base
 
     def grid(self, grid_id: str) -> sqlite3.Row | None:
         return cast(sqlite3.Row | None, self.db.execute("SELECT * FROM grids WHERE id=?", (grid_id,)).fetchone())
