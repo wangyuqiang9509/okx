@@ -105,6 +105,14 @@ class GridRunner:
     async def create(self) -> None:
         g = self.gcfg
         inst = self.inst
+        from .recover import grid_orders_on_exchange
+
+        stray = await grid_orders_on_exchange(self.rest, g.inst_id)  # type: ignore[arg-type]
+        if stray:
+            raise SystemExit(
+                f"{g.inst_id}: OKX already has {len(stray)} resting grid orders (e.g. {stray[0].cl_ord_id}) that this ledger does not know."
+                " A grid from another machine is still live. Run `gridbot recover` to adopt it instead of creating a new one (see DEPLOY.md)."
+            )
         fees = await self.rest.fees(g.inst_id)
         bal = await self.rest.balances(inst.quote_ccy, inst.base_ccy)
         if bal[inst.quote_ccy].avail < g.capital_quote:
@@ -339,6 +347,7 @@ class Supervisor:
         self.lock = asyncio.Lock()
         self.runners: dict[str, GridRunner] = {}
         self.stop = asyncio.Event()
+        self.idle = False
         self.quote_ccy = cfg.grids[0].inst_id.split("-")[1]
 
     def live(self) -> list[GridRunner]:
@@ -481,8 +490,11 @@ class Supervisor:
             for r in list(self.live()):
                 r.poll_status()
                 await r.retry_unplaced()
-        if not self.live():
-            self.stop.set()
+        if not self.live() and not self.idle:
+            # Stay up instead of exiting: a restart policy would otherwise bring the process
+            # straight back and create fresh grids nobody asked for.
+            self.idle = True
+            log.warning("every grid is closed; idling. Restart the runner deliberately to create new grids.")
 
     async def snapshot_all(self) -> None:
         for r in self.live():

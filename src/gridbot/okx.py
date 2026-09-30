@@ -77,6 +77,8 @@ class OrderSnapshot:
     fee_ccy: str
     u_time_ms: int
     cancel_source: str
+    c_time_ms: int = 0
+    ord_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,8 @@ def _snapshot(o: dict[str, Any]) -> OrderSnapshot:
         fee_ccy=o.get("feeCcy") or "",
         u_time_ms=int(o.get("uTime") or 0),
         cancel_source=o.get("cancelSource") or "",
+        c_time_ms=int(o.get("cTime") or 0),
+        ord_type=o.get("ordType") or "",
     )
 
 
@@ -211,6 +215,20 @@ class OkxRest:
                 return None
             raise
         return _snapshot(d)
+
+    async def orders_history(self, inst_id: str) -> list[OrderSnapshot]:
+        """Filled and cancelled orders of the last 7 days, newest first."""
+        out: list[OrderSnapshot] = []
+        after = ""
+        while True:
+            params = {"instType": "SPOT", "instId": inst_id, "limit": "100"}
+            if after:
+                params["after"] = after
+            data = await self._request("GET", "/api/v5/trade/orders-history", params)
+            out += [_snapshot(o) for o in data]
+            if len(data) < 100:
+                return out
+            after = data[-1]["ordId"]
 
     async def pending_orders(self, inst_id: str | None = None) -> list[OrderSnapshot]:
         """All resting SPOT orders, or only those on `inst_id`."""

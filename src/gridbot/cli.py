@@ -173,6 +173,89 @@ def cmd_rebaseline(cfg: Config) -> None:
     asyncio.run(main())
 
 
+def cmd_recover(cfg: Config) -> None:
+    from .okx import OkxRest
+    from .recover import RecoverError, recover, summary
+
+    creds = load_credentials()
+    ledger = Ledger(cfg.runtime.ledger_path)
+
+    async def main() -> None:
+        rest = OkxRest(creds)
+        try:
+            results = await recover(cfg, ledger, rest)
+        except RecoverError as e:
+            raise SystemExit(f"RECOVER FAILED: {e}") from None
+        finally:
+            await rest.close()
+        if not results:
+            print("no live grid orders on OKX for the configured instruments; nothing to recover. `gridbot start` will create fresh grids.")
+            return
+        print(summary(results, ledger))
+        print("RECOVER OK. Next: start the runner.")
+
+    asyncio.run(main())
+
+
+OKX_HINTS = {
+    "50105": "passphrase is wrong (OKX_PASSPHRASE)",
+    "50111": "API key is wrong (OKX_API_KEY)",
+    "50113": "secret is wrong (OKX_SECRET_KEY)",
+    "50110": "this machine's IP is not in the API key's IP allowlist",
+    "50119": "API key does not exist or was deleted",
+    "50102": "clock is off by more than 30s; sync the system time",
+    "60032": "key belongs to another OKX region; this bot uses www.okx.com",
+}
+
+
+def cmd_doctor(cfg: Config) -> None:
+    from .okx import OkxError, OkxRest
+    from .recover import grid_orders_on_exchange
+
+    creds = load_credentials()
+    ledger = Ledger(cfg.runtime.ledger_path)
+    quote = cfg.grids[0].inst_id.split("-")[1]
+    ccys = sorted({quote, *(g.inst_id.split("-")[0] for g in cfg.grids)})
+
+    async def main() -> int:
+        rest = OkxRest(creds)
+        try:
+            try:
+                bal = await rest.balances(*ccys)
+            except OkxError as e:
+                print(f"CREDENTIALS FAILED: okx {e.code} {e.msg}")
+                if e.code in OKX_HINTS:
+                    print(f"  likely cause: {OKX_HINTS[e.code]}")
+                return 2
+            print("credentials OK (read + trade)")
+            print("balances: " + ", ".join(f"{bal[c].total} {c}" for c in ccys))
+            live = {g.inst_id: await grid_orders_on_exchange(rest, g.inst_id) for g in cfg.grids}
+        finally:
+            await rest.close()
+        known = {r["inst_id"] for r in ledger.open_grids()}
+        need_recover = False
+        for g in cfg.grids:
+            n = len(live[g.inst_id])
+            state = "in ledger" if g.inst_id in known else "not in ledger"
+            print(f"{g.inst_id}: {n} live grid orders on OKX, {state}")
+            if n and g.inst_id not in known:
+                need_recover = True
+        if need_recover and known:
+            print("NEXT: ledger is partial; stop and ask the user (do not run recover or start)")
+            return 3
+        if need_recover:
+            print("NEXT: run `gridbot recover`, then start")
+        elif known:
+            print("NEXT: ledger matches; start the runner")
+        else:
+            print(f"NEXT: no grids anywhere; start will create new ones (needs {sum(g.capital_quote for g in cfg.grids)} {quote} free)")
+        return 0
+
+    code = asyncio.run(main())
+    if code:
+        sys.exit(code)
+
+
 def cmd_replay(cfg: Config, inst: str | None, days: int) -> None:
     import httpx
 
@@ -261,6 +344,8 @@ def main(argv: list[str] | None = None) -> None:
     with_inst("resume", "lift a halt")
     with_inst("cancel-all", "cancel resting grid orders and close the grid; holdings stay")
     sub.add_parser("rebaseline", help="after a deposit or withdrawal, reset the account pool to match balances")
+    sub.add_parser("doctor", help="check the API key, balances, and whether to recover or start")
+    sub.add_parser("recover", help="on a new machine: rebuild the ledger from OKX order history (places nothing)")
     rp = with_inst("replay", "replay recent 1m candles through the engine")
     rp.add_argument("--days", type=int, default=30)
     with_inst("check", "promotion criteria over the last 24h")
@@ -280,6 +365,10 @@ def main(argv: list[str] | None = None) -> None:
             cmd_cancel_all(cfg, inst)
         case "rebaseline":
             cmd_rebaseline(cfg)
+        case "doctor":
+            cmd_doctor(cfg)
+        case "recover":
+            cmd_recover(cfg)
         case "replay":
             cmd_replay(cfg, inst, a.days)
         case "check":

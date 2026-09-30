@@ -72,11 +72,12 @@ class Ledger:
         self.db.close()
 
     # ----- grids ------------------------------------------------------------------
-    def create_grid(self, grid_id: str, config_path: str, spec: dict[str, Any], state: dict[str, Any]) -> None:
+    def create_grid(self, grid_id: str, config_path: str, spec: dict[str, Any], state: dict[str, Any], created_ms: int | None = None) -> None:
+        created = created_ms or now_ms()
         self.db.execute(
             "INSERT INTO grids (id, created_ms, status, halt_reason, config_path, spec_json, state_json, quote_offset, base_offset, updated_ms, inst_id)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (grid_id, now_ms(), "active", "", config_path, json.dumps(spec), json.dumps(state), "", "", now_ms(), spec["inst_id"]),
+            (grid_id, created, "active", "", config_path, json.dumps(spec), json.dumps(state), "", "", now_ms(), spec["inst_id"]),
         )
 
     def open_grid(self, inst_id: str | None = None) -> sqlite3.Row | None:
@@ -136,10 +137,11 @@ class Ledger:
         return (row["status"], row["halt_reason"]) if row else ("missing", "")
 
     # ----- orders / fills / profits ------------------------------------------------
-    def order_placed(self, grid_id: str, o: dict[str, Any], ord_id: str, state: str = "live") -> None:
+    def order_placed(self, grid_id: str, o: dict[str, Any], ord_id: str, state: str = "live", ts_ms: int | None = None) -> None:
+        ts = ts_ms or now_ms()
         self.db.execute(
             "INSERT OR REPLACE INTO orders VALUES (?,?,?,?,?,?,?,?,COALESCE((SELECT created_ms FROM orders WHERE cl_ord_id=?),?),?)",
-            (o["cl_ord_id"], grid_id, o["idx"], o["side"], o["price"], o["qty"], state, ord_id, o["cl_ord_id"], now_ms(), now_ms()),
+            (o["cl_ord_id"], grid_id, o["idx"], o["side"], o["price"], o["qty"], state, ord_id, o["cl_ord_id"], ts, ts),
         )
 
     def order_state(self, cl_ord_id: str, state: str, ord_id: str = "") -> None:
@@ -154,8 +156,8 @@ class Ledger:
         )
         return cur.rowcount == 1
 
-    def profit(self, grid_id: str, sell_id: str, buy_id: str, profit: D) -> None:
-        self.db.execute("INSERT INTO profits (grid_id, sell_cl_ord_id, buy_cl_ord_id, profit, ts_ms) VALUES (?,?,?,?,?)", (grid_id, sell_id, buy_id, str(profit), now_ms()))
+    def profit(self, grid_id: str, sell_id: str, buy_id: str, profit: D, ts_ms: int | None = None) -> None:
+        self.db.execute("INSERT INTO profits (grid_id, sell_cl_ord_id, buy_cl_ord_id, profit, ts_ms) VALUES (?,?,?,?,?)", (grid_id, sell_id, buy_id, str(profit), ts_ms or now_ms()))
 
     def event(self, grid_id: str, kind: str, detail: dict[str, Any]) -> None:
         self.db.execute("INSERT INTO events (grid_id, ts_ms, kind, detail_json) VALUES (?,?,?,?)", (grid_id, now_ms(), kind, json.dumps(detail, default=str)))

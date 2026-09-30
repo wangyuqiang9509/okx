@@ -29,11 +29,13 @@ class FakeOrder:
     fee_ccy: str = ""
     state: str = "live"
     notional: D = D(0)
+    c_time: int = 0
+    u_time: int = 0
 
     def snap(self) -> OrderSnapshot:
         avg = self.notional / self.filled if self.filled else D(0)
         return OrderSnapshot(self.inst_id, self.cl_ord_id, self.ord_id, self.state, self.side, self.px, self.sz,
-                             self.filled, avg, self.fee, self.fee_ccy, 0, "")
+                             self.filled, avg, self.fee, self.fee_ccy, self.u_time, "", self.c_time)
 
 
 @dataclass
@@ -43,6 +45,11 @@ class FakeExchange:
     orders: dict[str, FakeOrder] = field(default_factory=dict)
     seq: int = 0
     trade_seq: int = 0
+    clock: int = 1_700_000_000_000
+
+    def tick(self) -> int:
+        self.clock += 1000
+        return self.clock
 
     async def instrument(self, inst_id: str) -> Instrument:
         return INSTRUMENTS[inst_id]
@@ -73,7 +80,8 @@ class FakeExchange:
         out = []
         for o in orders:
             self.seq += 1
-            fo = FakeOrder(inst_id, o["clOrdId"], str(self.seq), o["side"], D(o["px"]), D(o["sz"]))
+            now = self.tick()
+            fo = FakeOrder(inst_id, o["clOrdId"], str(self.seq), o["side"], D(o["px"]), D(o["sz"]), c_time=now, u_time=now)
             last = self.prices[inst_id]
             if o["ordType"] == "post_only" and ((fo.side == "buy" and fo.px >= last) or (fo.side == "sell" and fo.px < last)):
                 out.append(PlaceResult(fo.cl_ord_id, "", False, "51124", "post_only would cross"))
@@ -89,11 +97,21 @@ class FakeExchange:
     async def cancel_orders(self, inst_id: str, cl_ord_ids: list[str]) -> list[PlaceResult]:
         for c in cl_ord_ids:
             self.orders[c].state = "canceled"
+            self.orders[c].u_time = self.tick()
         return [PlaceResult(c, self.orders[c].ord_id, True, "0", "") for c in cl_ord_ids]
 
     async def order(self, inst_id: str, cl_ord_id: str) -> OrderSnapshot | None:
         o = self.orders.get(cl_ord_id)
         return o.snap() if o else None
+
+    async def orders_history(self, inst_id: str) -> list[OrderSnapshot]:
+        done = [o for o in self.orders.values() if o.inst_id == inst_id and o.state in ("filled", "canceled")]
+        return [o.snap() for o in sorted(done, key=lambda o: -o.u_time)]
+
+    def exchange_cancel(self, cl_ord_id: str) -> WsOrderUpdate:
+        o = self.orders[cl_ord_id]
+        o.state, o.u_time = "canceled", self.tick()
+        return WsOrderUpdate(o.snap(), None)
 
     async def pending_orders(self, inst_id: str | None = None) -> list[OrderSnapshot]:
         return [o.snap() for o in self.orders.values()
@@ -117,6 +135,7 @@ class FakeExchange:
         o.fee += fee
         o.fee_ccy = ccy
         o.state = "filled"
+        o.u_time = self.tick()
         return WsFill(o.cl_ord_id, o.ord_id, f"t{self.trade_seq}", px, sz, fee, ccy, 0)
 
     def move(self, inst_id: str, px: D) -> list[WsOrderUpdate]:

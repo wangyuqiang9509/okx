@@ -2,6 +2,8 @@
 
 Fixed-range spot grids on OKX, several instruments in one process (BTC, ETH, SOL against USDT). Vocabulary in `CONTEXT.md`, decisions in `docs/adr/`.
 
+**Moving to or setting up a machine: follow [DEPLOY.md](DEPLOY.md).** It is written so an AI agent can run it end to end; the only manual step is filling `.env`.
+
 ## Setup
 
 ```sh
@@ -22,6 +24,8 @@ All take `--config` (default `config/validate.toml`). Most take `--inst ETH-USDT
 | `gridbot halt` / `resume` | stop / restart placing new orders; resting orders stay on OKX |
 | `gridbot cancel-all` | cancel resting grid orders, close the grid, return its funds to the account pool; holdings stay |
 | `gridbot rebaseline` | after you deposit or withdraw, reset the account pool to match balances |
+| `gridbot doctor` | check the API key and balances, and say whether to `recover` or `start` |
+| `gridbot recover` | on an empty ledger: rebuild every live grid from OKX order history (read only) |
 | `gridbot check` | per grid, promotion criteria over the last 24h |
 
 To replace a grid (new range or parameters): `cancel-all --inst X`, edit the config, restart the runner.
