@@ -160,6 +160,23 @@ class OkxRest:
         (d,) = await self._request("GET", "/api/v5/market/ticker", {"instId": inst_id})
         return Ticker(D(d["last"]), D(d["bidPx"]), D(d["askPx"]))
 
+    async def daily_closes(self, inst_id: str, n: int = 300) -> list[tuple[int, D]]:
+        """Closed daily UTC candles, oldest first: (day start ms, close)."""
+        out: dict[int, D] = {}
+        after = ""
+        while len(out) < n:
+            params = {"instId": inst_id, "bar": "1Dutc", "limit": "100"}
+            if after:
+                params["after"] = after
+            data = await self._request("GET", "/api/v5/market/history-candles", params)
+            if not data:
+                break
+            for x in data:
+                if x[8] == "1":
+                    out[int(x[0])] = D(x[4])
+            after = data[-1][0]
+        return sorted(out.items())[-n:]
+
     async def server_time_ms(self) -> int:
         (d,) = await self._request("GET", "/api/v5/public/time")
         return int(d["ts"])

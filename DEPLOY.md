@@ -169,24 +169,56 @@ docker exec gridbot gridbot -c config/validate.toml status
 | 充值或提现之后 | `docker exec gridbot gridbot -c config/validate.toml rebaseline`，然后 `resume` |
 | 升级验收（见下） | `docker exec gridbot gridbot -c config/validate.toml check` |
 
-## 验收与升级
+## 验收
 
-- 三个网格都运行满 24 小时后（2026-10-01 09:46 UTC 之后）执行 `check`。
-- 全部 `pass` 时，**先问用户**是否切换到正式配置 `config/multi.toml`（每个币 100 USDT，BTC 格距 1%，ETH、SOL 格距 2%）。
-- 用户同意后：
+- 三个网格都运行满 24 小时后（2026-10-01 09:46 UTC 之后）执行：
 
 ```sh
-docker compose down
-docker compose run --rm gridbot gridbot -c config/validate.toml cancel-all
-sed -i 's#config/validate.toml#config/multi.toml#' docker-compose.yml   # macOS: sed -i ''
-docker compose up -d
-sleep 20
-docker compose logs --tail 60
+docker exec gridbot gridbot -c config/validate.toml check
 ```
 
-顺序不能换：先停容器再撤单，否则运行中的进程会在撤单过程中继续挂反向单。
+- 全部 `pass` 说明执行层（下单、成交回报、补单、对账）在实盘上可靠。下一步不是扩大网格，而是按下一节切换到趋势策略。
+- 有 `FAIL` 时把输出原样告诉用户，不要切换。
 
-**预期：** `cancel-all` 每个币输出 `closed, released ...`。启动后出现三行 `creating:`、三行 `seed attempt 1: filled`，随后 `reconcile (created) ok`。旧网格剩下的 BTC、ETH、SOL 留在账户池里不动，新网格用账户池里的 USDT 建仓。
+## 从网格切换到趋势策略
+
+用户已决定（见 `docs/adr/0004-trend-strategy-replaces-grid.md`）：网格验收通过后停掉，全部资金交给趋势策略，目标波动率 40%。
+
+**前提：** `check` 已全部 `pass`，并且**向用户确认过**现在切换。
+
+```sh
+# 1. 停掉网格进程，撤掉全部网格单并关闭网格（持有的币留在账户池里，不卖）
+docker compose down
+docker compose run --rm gridbot gridbot -c config/validate.toml cancel-all
+
+# 2. 预览今天的趋势信号和将要下的单（只读，不下单）
+docker compose run --rm gridbot gridbot -c config/trend.toml trend-plan
+```
+
+**预期：** 每个币一行六票、波动率和 Weight；下面是 `plan for hypothetical book from the account pool`，列出每个币的目标和买卖动作。把这段输出给用户看，**用户确认后**再继续。
+
+```sh
+# 3. 把容器的命令换成趋势策略并启动
+sed -i 's#"--config", "config/[a-z]*.toml", "start"#"--config", "config/trend.toml", "trend-run"#' docker-compose.yml   # macOS: sed -i ''
+grep command docker-compose.yml
+docker compose up -d
+sleep 30
+docker compose logs --tail 40
+```
+
+**预期：** `grep` 显示 `config/trend.toml` 和 `trend-run`。日志里依次出现：`created with ... USDT and ...`、`reconcile (startup) ok`、每个币一行 `weight ... target ... -> buy/sell ...`、每笔成交一行、`reconcile (rebalance) ok`。
+
+之后每天 UTC 00:05 自动调仓一次。日常命令：
+
+| 目的 | 命令 |
+|---|---|
+| 看状态和最近的决策 | `docker exec gridbot gridbot -c config/trend.toml trend-status` |
+| 看今天的信号（只读） | `docker exec gridbot gridbot -c config/trend.toml trend-plan` |
+| 暂停调仓（持仓不动） | `docker exec gridbot gridbot -c config/trend.toml trend-halt` |
+| 恢复 | `docker exec gridbot gridbot -c config/trend.toml trend-resume` |
+| 充值或提现之后 | 先 `trend-halt`，用 `gridbot -c config/validate.toml rebaseline` 同步账户池，再 `trend-resume` |
+
+对账失败会自动暂停调仓，处理方式同铁律 4。
 
 ## 再次迁移到别的机器
 

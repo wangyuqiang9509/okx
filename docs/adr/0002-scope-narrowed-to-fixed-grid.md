@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0004
 ---
 # 项目范围收窄为 BTC-USDT 现货固定区间网格机器人
 

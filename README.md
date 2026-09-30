@@ -1,6 +1,6 @@
-# OKX Grid Bot
+# OKX Quant Bot
 
-Fixed-range spot grids on OKX, several instruments in one process (BTC, ETH, SOL against USDT). Vocabulary in `CONTEXT.md`, decisions in `docs/adr/`.
+Long-only spot strategies on OKX for BTC, ETH and SOL against USDT: a daily Trend Strategy (main, see ADR-0004) and fixed-range grids. One strategy runs on the account at a time. Vocabulary in `CONTEXT.md`, decisions in `docs/adr/`.
 
 **Moving to or setting up a machine: follow [DEPLOY.md](DEPLOY.md).** It is written so an AI agent can run it end to end; the only manual step is filling `.env`.
 
@@ -27,6 +27,19 @@ All take `--config` (default `config/validate.toml`). Most take `--inst ETH-USDT
 | `gridbot doctor` | check the API key and balances, and say whether to `recover` or `start` |
 | `gridbot recover` | on an empty ledger: rebuild every live grid from OKX order history (read only) |
 | `gridbot check` | per grid, promotion criteria over the last 24h |
+
+### Trend Strategy (`-c config/trend.toml`)
+
+| command | what it does |
+|---|---|
+| `gridbot trend-plan` | today's six votes, volatility and weight per coin, and the trades a rebalance would send; places nothing |
+| `gridbot trend-run` | create the Book from the account pool (or resume it) and rebalance daily at 00:05 UTC |
+| `gridbot trend-status` | Book cash and holdings, PnL, recent decisions, reconciliation |
+| `gridbot trend-halt` / `trend-resume` | stop / restart rebalancing; holdings stay |
+| `gridbot trend-close` | close the Book and hand everything to the account pool; sells nothing |
+| `gridbot trend-backtest [--years N]` | the live rebalancing rule on `data/candles/*-1D.csv` (`python research/fetch_1d.py`) |
+
+### Grids
 
 To replace a grid (new range or parameters): `cancel-all --inst X`, edit the config, restart the runner.
 

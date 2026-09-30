@@ -1,6 +1,6 @@
-# OKX Grid Bot
+# OKX Quant Bot
 
-一个自用的、在 OKX 现货上同时运行多个固定区间网格的交易机器人（目前 BTC、ETH、SOL 各一个，均以 USDT 计价）：把一段价格区间切成若干格，每格常驻一张限价单，低买高卖赚取震荡差价。价格离开区间后不追、不止损，最差情形是满仓持有该币。
+一个自用的、在 OKX 现货上交易 BTC、ETH、SOL（均以 USDT 计价）的量化机器人，只做多。有两种 Strategy：Trend Strategy（主策略，每天按趋势和波动率调仓）和 Grid（固定区间网格，保留在代码中）。同一账户同一时间只运行其中一种。
 
 ## Language
 
@@ -10,11 +10,49 @@
 OKX 上一个可交易的现货交易对，以 OKX 的 instId 为唯一标识。每个 Instrument 同一时刻至多一个开着的 Grid；所有 Instrument 共用同一种计价币。
 _Avoid_: symbol, pair, ticker, 币种
 
+**Strategy（策略）**:
+决定账户里持有多少币的一套确定性规则。本项目有 Grid 和 Trend Strategy 两种。
+_Avoid_: bot, robot, algo, 机器人
+
+### 趋势策略
+
+**Trend Strategy（趋势策略）**:
+每天用各 Instrument 的日线计算 Weight，并把每个 Sleeve 的持仓调到 Weight 的 Strategy。牛市接近满仓，熊市空仓，趋势不明时部分持仓。
+_Avoid_: CTA, 趋势机器人, trend bot
+
+**Book（账簿）**:
+Trend Strategy 名下的 USDT 与各币持仓。创建时从 Account Pool 划入，关闭时全部归还给 Account Pool，关闭本身不做任何交易。
+_Avoid_: portfolio, account, 账户, 组合
+
+**Sleeve（分仓）**:
+Book 权益按 Instrument 等分后的一份。每个 Instrument 只在自己的 Sleeve 内决定持币多少。
+_Avoid_: allocation, bucket, 子账户
+
+**Trend Vote（趋势票）**:
+对一个 Instrument 的六个二元判断：收盘价是否高于 50、100、200 日均线，是否高于 30、90、180 天前的收盘价。Ensemble 是六票的平均值，取值 0 到 1。
+_Avoid_: signal, indicator, 指标
+
+**Target Volatility（目标波动率）**:
+风险旋钮。Weight = Ensemble × min(1, Target Volatility ÷ 近 30 日年化波动率)。越高越接近满仓，收益和回撤同比例变大。
+_Avoid_: risk level, 风险系数
+
+**Weight（目标权重）**:
+一个 Sleeve 中应持有币的价值占比，0 到 1，剩下的是 USDT。
+_Avoid_: signal, position size, 仓位比例
+
+**Rebalance（调仓）**:
+每天 UTC 日线收盘后，把各 Sleeve 的持仓调向 Weight 的一次动作。偏离不超过 Sleeve 的 5% 或金额低于最小交易额时不交易。日线数据不是最新时推迟，不用旧数据交易。
+_Avoid_: sync, 再平衡, 调整
+
+**Decision（决策记录）**:
+每次 Rebalance 为每个 Instrument 记下的六票、波动率、Weight、目标价值、当前价值和实际动作，是事后复盘的依据。
+_Avoid_: log, signal history, 日志
+
 ### 网格
 
 **Grid（网格）**:
 一个 Instrument 上、一个固定的价格区间被切成若干 Level 的整体。区间在启动时确定，运行中不移动；价格离开区间后 Grid 不再产生新的 Order，直到人工重设。
-_Avoid_: strategy, 策略, bot, 机器人
+_Avoid_: bot, 机器人
 
 **Level（格）**:
 Grid 内的一个价格点。任一时刻每个 Level 上至多一张 Order。成交回报乱序到达时，要挂到仍被占用的 Level 上的对侧 Order 会先暂存，等该 Level 腾出后再挂出。
@@ -39,14 +77,14 @@ _Avoid_: PnL, 收益, 盈利, 套利
 ### 账户
 
 **Equity（权益）**:
-一个 Grid 以计价币计算的总价值：它的计价币余额加上 Position 按最新价折算的价值。
+一个 Grid 或 Book 以计价币计算的总价值：它的计价币余额加上所持币按最新价折算的价值。
 _Avoid_: balance, NAV, 净值, 总资产
 
 **Position（仓位）**:
 某个 Grid 持有的基础币数量，非负。
 
 **Account Pool（账户池）**:
-账户里不属于任何开着的 Grid 的资金，按币种记账。创建 Grid 时从中划出本金，关闭 Grid 时剩余资金归还给它。账户实际余额必须等于账户池加上所有开着的 Grid 所持有的量，否则就是对账差异。
+账户里不属于任何开着的 Grid 或 Book 的资金，按币种记账。创建 Grid 或 Book 时从中划出，关闭时剩余资金归还给它。账户实际余额必须等于账户池加上所有开着的 Grid 和 Book 所持有的量，否则就是对账差异。
 _Avoid_: idle funds, 闲钱, 余额, offset
 _Avoid_: holding, 持仓, balance
 
@@ -69,7 +107,7 @@ _Avoid_: database, history, 流水
 _Avoid_: sync, 同步
 
 **Halt（停机）**:
-平台停止提交任何新 Order 的状态，由对账失败、连接异常或人工命令触发。已挂在 OKX 上的 Order 原样保留，Halt 不等于撤单，更不等于清仓。
+Grid 停止提交新 Order、或 Book 停止 Rebalance 的状态，由对账失败、连接异常或人工命令触发。已挂在 OKX 上的 Order 和已持有的币原样保留，Halt 不等于撤单，更不等于清仓。
 _Avoid_: stop, pause, kill, 熔断
 
 ### 运行方式

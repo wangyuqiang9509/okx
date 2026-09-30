@@ -1,0 +1,18 @@
+# Trend Strategy: six-vote trend ensemble with volatility targeting, equal Sleeves.
+# See research/2026-09-30-trend-and-range.md and docs/adr/0004-trend-strategy-replaces-grid.md.
+
+[runtime]
+ledger_path = "data/gridbot.sqlite"
+log_dir = "data/logs"
+reconcile_interval_s = 3600
+snapshot_interval_s = 300
+
+[trend]
+inst_ids = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+capital_quote = "all"        # USDT taken from the account pool at creation; a number takes that much
+adopt_pool_coins = true      # coins left in the pool (e.g. by closed grids) become the Book's starting holdings
+target_vol_pct = 40          # risk dial: weight = ensemble * min(1, target / 30-day vol)
+rebalance_band_pct = 5       # trade only when a Sleeve drifts more than this share from its target
+min_trade_quote = 5          # never send an order smaller than this (USDT)
+slippage_pct = 0.1           # IOC limit price = ask * (1 + this) for buys, bid * (1 - this) for sells
+rebalance_utc = "00:05"      # daily, after the UTC daily candle closes

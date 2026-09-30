@@ -46,6 +46,10 @@ class FakeExchange:
     seq: int = 0
     trade_seq: int = 0
     clock: int = 1_700_000_000_000
+    daily: dict[str, list[tuple[int, D]]] = field(default_factory=dict)
+
+    async def daily_closes(self, inst_id: str, n: int = 300) -> list[tuple[int, D]]:
+        return self.daily.get(inst_id, [])[-n:]
 
     def tick(self) -> int:
         self.clock += 1000

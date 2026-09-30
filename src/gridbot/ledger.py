@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT, grid_id TEXT, ts_ms INTEGER, quote TEXT, base TEXT, last_px TEXT, equity TEXT, realised TEXT
 );
+CREATE TABLE IF NOT EXISTS books (
+  id TEXT PRIMARY KEY, kind TEXT, created_ms INTEGER, status TEXT, halt_reason TEXT,
+  config_path TEXT, state_json TEXT, updated_ms INTEGER
+);
+CREATE TABLE IF NOT EXISTS decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, book_id TEXT, day TEXT, inst_id TEXT, ts_ms INTEGER, detail_json TEXT
+);
 CREATE TABLE IF NOT EXISTS account_pool (
   ccy TEXT PRIMARY KEY, amount TEXT, updated_ms INTEGER
 );
@@ -100,6 +107,69 @@ class Ledger:
 
     def pool_add(self, ccy: str, delta: D) -> None:
         self.pool_set(ccy, self.pool().get(ccy, D(0)) + delta)
+
+    # ----- books: non-grid strategies holding cash and coins ------------------------------
+    def open_book(self, kind: str) -> sqlite3.Row | None:
+        return cast(sqlite3.Row | None, self.db.execute(
+            "SELECT * FROM books WHERE kind=? AND status IN ('active','halted') ORDER BY created_ms DESC LIMIT 1", (kind,)).fetchone())
+
+    def open_books(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM books WHERE status IN ('active','halted')").fetchall()
+
+    def create_book(self, book_id: str, kind: str, config_path: str, state: dict[str, Any], take: dict[str, D]) -> None:
+        """Create a Book funded from the Account Pool, atomically."""
+        pool = self.pool()
+        for ccy, amt in take.items():
+            if pool.get(ccy, D(0)) < amt:
+                raise ValueError(f"pool has {pool.get(ccy, D(0))} {ccy}, book wants {amt}")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            for ccy, amt in take.items():
+                self.pool_add(ccy, -amt)
+            self.db.execute("INSERT INTO books VALUES (?,?,?,?,?,?,?,?)",
+                            (book_id, kind, now_ms(), "active", "", config_path, json.dumps(state), now_ms()))
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+        self.event(book_id, "book_created", {"take": {k: str(v) for k, v in take.items()}})
+
+    def save_book(self, book_id: str, state: dict[str, Any]) -> None:
+        self.db.execute("UPDATE books SET state_json=?, updated_ms=? WHERE id=?", (json.dumps(state), now_ms(), book_id))
+
+    def book_status(self, book_id: str) -> tuple[str, str]:
+        row = self.db.execute("SELECT status, halt_reason FROM books WHERE id=?", (book_id,)).fetchone()
+        return (row["status"], row["halt_reason"]) if row else ("missing", "")
+
+    def set_book_status(self, book_id: str, status: str, reason: str = "") -> None:
+        self.db.execute("UPDATE books SET status=?, halt_reason=?, updated_ms=? WHERE id=?", (status, reason, now_ms(), book_id))
+        self.event(book_id, "status", {"status": status, "reason": reason})
+
+    def close_book(self, book_id: str, reason: str) -> dict[str, D]:
+        """Mark closed and hand cash and coins back to the pool, atomically. Trades nothing."""
+        row = self.db.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()
+        if row is None or row["status"] == "closed":
+            return {}
+        st = json.loads(row["state_json"])
+        release = {st["quote_ccy"]: D(st["cash"])} | {c: D(q) for c, q in st["holdings"].items()}
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            for ccy, amt in release.items():
+                self.pool_add(ccy, amt)
+            self.db.execute("UPDATE books SET status='closed', halt_reason=?, updated_ms=? WHERE id=?", (reason, now_ms(), book_id))
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+        self.event(book_id, "status", {"status": "closed", "reason": reason, "released": {k: str(v) for k, v in release.items()}})
+        return release
+
+    def decision(self, book_id: str, day: str, inst_id: str, detail: dict[str, Any]) -> None:
+        self.db.execute("INSERT INTO decisions (book_id, day, inst_id, ts_ms, detail_json) VALUES (?,?,?,?,?)",
+                        (book_id, day, inst_id, now_ms(), json.dumps(detail, default=str)))
+
+    def decisions(self, book_id: str, limit: int = 30) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM decisions WHERE book_id=? ORDER BY id DESC LIMIT ?", (book_id, limit)).fetchall()
 
     def close_grid(self, grid_id: str, reason: str) -> tuple[D, D]:
         """Mark closed and hand the grid's remaining cash and base back to the pool, atomically."""

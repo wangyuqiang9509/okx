@@ -107,6 +107,8 @@ class GridRunner:
         inst = self.inst
         from .recover import grid_orders_on_exchange
 
+        if self.ledger.open_books():
+            raise SystemExit(f"{g.inst_id}: a Trend Book is active in this account; close it before creating grids")
         stray = await grid_orders_on_exchange(self.rest, g.inst_id)  # type: ignore[arg-type]
         if stray:
             raise SystemExit(

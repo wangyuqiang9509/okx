@@ -12,14 +12,14 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from .config import Config, load_config, load_credentials
+from .config import Config, TrendConfig, load_config, load_credentials, load_trend_config
 from .engine import GridEngine
 from .ledger import Ledger, now_ms
 
 DAY_MS = 86_400_000
 
 
-def setup_logging(cfg: Config) -> None:
+def setup_logging(cfg: Config | TrendConfig) -> None:
     cfg.runtime.log_dir.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     root = logging.getLogger()
@@ -323,6 +323,149 @@ def _check_grid(ledger: Ledger, row: sqlite3.Row) -> bool:
     return True
 
 
+# ----- trend ------------------------------------------------------------------------------
+def cmd_trend_run(tc: TrendConfig) -> None:
+    from .okx import OkxRest
+    from .trend_runner import TrendRunner
+
+    setup_logging(tc)
+    creds = load_credentials()
+
+    async def main() -> None:
+        rest = OkxRest(creds)
+        ledger = Ledger(tc.runtime.ledger_path)
+        try:
+            await TrendRunner(tc, ledger, rest).run()
+        finally:
+            await rest.close()
+            ledger.close()
+
+    asyncio.run(main())
+
+
+def cmd_trend_plan(tc: TrendConfig) -> None:
+    """Today's signals and the trades the runner would send now. Places nothing."""
+    from .okx import OkxRest
+    from .trend import Market, plan, signal
+    from .trend_runner import HISTORY_DAYS, KIND, BookState
+
+    ledger = Ledger(tc.runtime.ledger_path)
+    row = ledger.open_book(KIND)
+
+    async def main() -> None:
+        rest = OkxRest(None)
+        try:
+            insts = {i: await rest.instrument(i) for i in tc.inst_ids}
+            weights, markets = {}, []
+            print(f"{'inst':9} {'last day':10} {'votes':>6} {'ens':>5} {'vol':>5} {'weight':>6}  price")
+            for i in tc.inst_ids:
+                closes = await rest.daily_closes(i, HISTORY_DAYS)
+                sg = signal([float(c) for _, c in closes], tc.target_vol)
+                t = await rest.ticker(i)
+                weights[i] = sg.weight
+                markets.append(Market(i, insts[i].base_ccy, t.last, insts[i].lot_sz, insts[i].min_sz))
+                print(f"{i:9} {_ts(closes[-1][0])[:10]} {''.join(map(str, sg.votes)):>6} {sg.ensemble:>5.2f} {sg.vol * 100:>4.0f}% {sg.weight:>6.3f}  {t.last}")
+        finally:
+            await rest.close()
+        if row is not None:
+            b = BookState.from_dict(json.loads(row["state_json"]))
+            cash, holdings, src = b.cash, b.holdings, f"book {b.book_id}"
+        else:
+            pool = ledger.pool()
+            cash = pool.get(tc.quote_ccy, D(0)) if tc.capital_quote is None else tc.capital_quote
+            holdings = {m.base_ccy: pool.get(m.base_ccy, D(0)) for m in markets} if tc.adopt_pool_coins else {}
+            src = "hypothetical book from the account pool (no book yet)"
+        print(f"\nplan for {src}: cash {cash} {tc.quote_ccy}, holdings {{{', '.join(f'{k}: {v}' for k, v in holdings.items() if v)}}}")
+        for p in plan(cash, holdings, markets, weights, tc.band, tc.min_trade_quote):
+            act = f"{p.trade.side} {p.trade.qty} (~{p.trade.notional:.2f})" if p.trade else p.reason
+            print(f"  {p.inst_id:9} target {p.target_value:>9.2f}  current {p.current_value:>9.2f}  -> {act}")
+
+    asyncio.run(main())
+
+
+def cmd_trend_status(tc: TrendConfig) -> None:
+    from .trend_runner import KIND, BookState
+
+    ledger = Ledger(tc.runtime.ledger_path)
+    row = ledger.open_book(KIND)
+    if row is None:
+        raise SystemExit("no open trend book")
+    b = BookState.from_dict(json.loads(row["state_json"]))
+    snap = ledger.last_snapshot(b.book_id)
+    print(f"trend book {b.book_id}  {row['status']} {row['halt_reason'] or ''}  created {_ts(row['created_ms'])}")
+    print(f"cash {b.cash:.4f} {b.quote_ccy}  holdings {', '.join(f'{v} {k}' for k, v in b.holdings.items() if v) or 'none'}")
+    print(f"capital in {b.capital_in:.2f}  trades {b.trades}  fees {b.fees_quote:.4f}  last rebalance {b.last_day or 'never'}")
+    if snap:
+        print(f"last snapshot {_ts(snap['ts_ms'])}: equity {D(snap['equity']):.2f}  pnl {D(snap['realised']):+.2f}")
+    print("latest decisions:")
+    for d in reversed(ledger.decisions(b.book_id, 3 * len(tc.inst_ids))):
+        x = json.loads(d["detail_json"])
+        tr = x.get("trade")
+        act = f"{tr['side']} {tr['qty']}" if tr else x.get("reason")
+        print(f"  {d['day']} {d['inst_id']:9} votes {''.join(map(str, x['votes']))} weight {x['weight']:.3f} target {x['target']:>9} current {x['current']:>9} -> {act}")
+    recs = ledger.events_since(b.book_id, now_ms() - DAY_MS, "reconcile")
+    if recs:
+        last = json.loads(recs[-1]["detail_json"])
+        print(f"reconcile last 24h: {len(recs)} runs, last ok={last.get('ok')} {last.get('problem', '')}")
+    print("account pool: " + ", ".join(f"{v} {k}" for k, v in sorted(ledger.pool().items())))
+
+
+def cmd_trend_set(tc: TrendConfig, status: str) -> None:
+    from .trend_runner import KIND
+
+    ledger = Ledger(tc.runtime.ledger_path)
+    row = ledger.open_book(KIND)
+    if row is None:
+        raise SystemExit("no open trend book")
+    if status == "closed":
+        rel = ledger.close_book(row["id"], "manual")
+        print(f"book {row['id']} closed; released to the account pool (nothing was sold): " + ", ".join(f"{v} {k}" for k, v in rel.items()))
+        print("the running process idles; stop it before starting anything else on this account")
+    else:
+        ledger.set_book_status(row["id"], status, "manual" if status == "halted" else "")
+        print(f"book {row['id']} -> {status} (runner picks it up within 30s)")
+
+
+def cmd_trend_backtest(tc: TrendConfig, years: float) -> None:
+    import math
+
+    from .trend import MIN_HISTORY, backtest
+
+    closes: dict[str, list[float]] = {}
+    days: dict[str, list[int]] = {}
+    for i in tc.inst_ids:
+        path = Path("data/candles") / f"{i}-1D.csv"
+        if not path.exists():
+            raise SystemExit(f"{path} missing; run `python research/fetch_1d.py` first")
+        rows = [line.split(",") for line in path.read_text().splitlines()]
+        days[i] = [int(r[0]) for r in rows]
+        closes[i] = [float(r[4]) for r in rows]
+    t0 = max(v[0] for v in days.values())
+    for i in tc.inst_ids:
+        k = days[i].index(t0)
+        days[i], closes[i] = days[i][k:], closes[i][k:]
+    n = min(len(v) for v in closes.values())
+    start = max(MIN_HISTORY, n - int(years * 365)) if years else MIN_HISTORY
+    eq = backtest({i: v[:n] for i, v in closes.items()}, start, tc.target_vol, float(tc.band), float(tc.min_trade_quote), 10_000.0)
+    d0 = days[tc.inst_ids[0]]
+    yrs = (len(eq) - 1) / 365
+    peak, mdd = eq[0], 0.0
+    for x in eq:
+        peak = max(peak, x)
+        mdd = max(mdd, 1 - x / peak)
+    r = [eq[k] / eq[k - 1] - 1 for k in range(1, len(eq))]
+    mean = sum(r) / len(r)
+    sd = math.sqrt(sum((x - mean) ** 2 for x in r) / len(r))
+    print(f"{_ts(d0[start])[:10]} .. {_ts(d0[n - 1])[:10]}, target vol {tc.target_vol:.0%}, band {tc.band:.0%}, min trade {tc.min_trade_quote}")
+    print(f"CAGR {(eq[-1] / eq[0]) ** (1 / yrs) - 1:.1%}  vol {sd * math.sqrt(365):.1%}  Sharpe {mean * 365 / (sd * math.sqrt(365)):.2f}  maxDD {mdd:.1%}")
+    by: dict[str, tuple[float, float]] = {}
+    for k in range(1, len(eq)):
+        y = _ts(d0[start + k])[:4]
+        first = by.get(y, (eq[k - 1], 0.0))[0]
+        by[y] = (first, eq[k])
+    print("by year: " + ", ".join(f"{y} {b / a - 1:+.0%}" for y, (a, b) in by.items()))
+
+
 def _ts(ms: int) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ms / 1000)) + "Z"
 
@@ -349,7 +492,33 @@ def main(argv: list[str] | None = None) -> None:
     rp = with_inst("replay", "replay recent 1m candles through the engine")
     rp.add_argument("--days", type=int, default=30)
     with_inst("check", "promotion criteria over the last 24h")
+    sub.add_parser("trend-run", help="run the Trend Strategy (use -c config/trend.toml)")
+    sub.add_parser("trend-plan", help="show today's trend signals and the trades that would be sent; places nothing")
+    sub.add_parser("trend-status", help="show the Trend Book, recent decisions and reconciliation")
+    sub.add_parser("trend-halt", help="stop rebalancing; holdings stay")
+    sub.add_parser("trend-resume", help="lift a trend halt")
+    sub.add_parser("trend-close", help="close the Trend Book and hand its cash and coins to the account pool; sells nothing")
+    bt = sub.add_parser("trend-backtest", help="backtest the live rebalancing rule on data/candles/*-1D.csv")
+    bt.add_argument("--years", type=float, default=0, help="only the last N years (default: all)")
     a = p.parse_args(argv)
+    if a.cmd.startswith("trend-"):
+        tc = load_trend_config(a.config)
+        match a.cmd:
+            case "trend-run":
+                cmd_trend_run(tc)
+            case "trend-plan":
+                cmd_trend_plan(tc)
+            case "trend-status":
+                cmd_trend_status(tc)
+            case "trend-halt":
+                cmd_trend_set(tc, "halted")
+            case "trend-resume":
+                cmd_trend_set(tc, "active")
+            case "trend-close":
+                cmd_trend_set(tc, "closed")
+            case "trend-backtest":
+                cmd_trend_backtest(tc, a.years)
+        return
     cfg = load_config(a.config)
     inst = getattr(a, "inst", None)
     match a.cmd:

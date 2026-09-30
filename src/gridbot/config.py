@@ -107,3 +107,52 @@ def _load_dotenv(path: Path) -> None:
             continue
         k, v = line.split("=", 1)
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+@dataclass(frozen=True)
+class TrendConfig:
+    inst_ids: tuple[str, ...]
+    capital_quote: Decimal | None  # None = everything in the pool
+    adopt_pool_coins: bool
+    target_vol: float
+    band: Decimal
+    min_trade_quote: Decimal
+    slippage: Decimal
+    rebalance_minute_utc: int  # minutes after 00:00 UTC
+    runtime: RuntimeConfig
+    path: Path
+
+    @property
+    def quote_ccy(self) -> str:
+        return self.inst_ids[0].split("-")[1]
+
+
+def load_trend_config(path: str | Path) -> TrendConfig:
+    p = Path(path)
+    with p.open("rb") as f:
+        raw = tomllib.load(f)
+    if "trend" not in raw:
+        raise ValueError(f"{p}: no [trend] section")
+    t, r = raw["trend"], raw["runtime"]
+    insts = tuple(str(i) for i in t["inst_ids"])
+    if len({i.split("-")[1] for i in insts}) != 1:
+        raise ValueError(f"{p}: all instruments must share one quote currency")
+    cap = t.get("capital_quote", "all")
+    hh, mm = str(t.get("rebalance_utc", "00:05")).split(":")
+    return TrendConfig(
+        inst_ids=insts,
+        capital_quote=None if str(cap) == "all" else Decimal(str(cap)),
+        adopt_pool_coins=bool(t.get("adopt_pool_coins", True)),
+        target_vol=float(t["target_vol_pct"]) / 100,
+        band=Decimal(str(t.get("rebalance_band_pct", 5))) / 100,
+        min_trade_quote=Decimal(str(t.get("min_trade_quote", 5))),
+        slippage=Decimal(str(t.get("slippage_pct", "0.1"))) / 100,
+        rebalance_minute_utc=int(hh) * 60 + int(mm),
+        runtime=RuntimeConfig(
+            ledger_path=Path(r.get("ledger_path", "data/gridbot.sqlite")),
+            log_dir=Path(r.get("log_dir", "data/logs")),
+            reconcile_interval_s=int(r.get("reconcile_interval_s", 3600)),
+            snapshot_interval_s=int(r.get("snapshot_interval_s", 300)),
+        ),
+        path=p,
+    )
