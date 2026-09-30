@@ -176,3 +176,22 @@ def test_close_hands_everything_back_to_the_pool(tmp_path):
     assert pool["USDT"] == cash
     for c, q in held.items():
         assert pool[c] == q
+
+
+def test_new_machine_with_empty_ledger_adopts_the_whole_account(tmp_path):
+    """Migration of a running Trend Strategy: no ledger, the account holds USDT and coins."""
+    ex = market(DAY0)
+    ex.bal = {"USDT": D("120"), "BTC": D("0.001"), "ETH": D("0.02"), "SOL": D("0")}
+    ledger = Ledger(tmp_path / "fresh.sqlite")
+    clock = Clock(DAY0 + 10 * 60_000)
+    r = TrendRunner(cfg(tmp_path), ledger, ex, clock=clock, sleep=nosleep)
+
+    async def go():
+        await r.ensure_book()
+        before = (r.book.cash, dict(r.book.holdings))
+        await r.tick()
+        return before, await r.reconcile("t")
+
+    (cash, holdings), problems = run(go())
+    assert cash == D("120") and holdings == {"BTC": D("0.001"), "ETH": D("0.02")}
+    assert problems == {}

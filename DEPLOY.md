@@ -1,28 +1,32 @@
-# DEPLOY.md：在新机器上接手并启动网格机器人
+# DEPLOY.md：在服务器上部署、接手和切换交易机器人
 
-> **给执行本文档的 AI：** 按顺序执行每一步，每步都有「预期结果」，不符合就停下来把输出原样告诉用户，不要自己想办法绕过。
+> **给执行本文档的 AI：** 先读「背景」和「铁律」，再按「第一步：判断当前阶段」找到该执行的章节。每步都有「预期结果」，不符合就停下来把输出原样告诉用户，不要自己想办法绕过。
 > 唯一需要用户提供的是 `.env` 里的三个值。除此之外所有事都由你完成。
 > 真实资金在运行。任何一步不确定时，停下来问用户，而不是猜。
 
 ## 背景（执行前读一遍）
 
-- 这是一个在 OKX 现货上同时跑 BTC、ETH、SOL 三个固定区间网格的机器人。词汇见 `CONTEXT.md`，设计决策见 `docs/adr/`。
+- 这是一个在 OKX 现货上交易 BTC、ETH、SOL 的量化机器人，只做多。词汇见 `CONTEXT.md`，设计决策见 `docs/adr/`，研究记录见 `research/`。
+- 有两种策略，**同一账户同一时间只运行一种**，程序会强制检查：
+  - **网格**（`config/validate.toml`，命令 `start`）：目前在跑的三个小额验证网格，用来验证下单和对账在实盘上可靠。
+  - **趋势策略**（`config/trend.toml`，命令 `trend-run`）：主策略，每天 UTC 00:05 按趋势和波动率调仓，见 `docs/adr/0004-trend-strategy-replaces-grid.md`。
+- 用户已经决定的路线：网格跑满 24 小时并通过 `check` 验收后停掉，全部资金交给趋势策略，目标波动率 40%。**切换前必须让用户看过 `trend-plan` 的输出并确认。**
 - 网格的挂单**一直挂在 OKX 上**，机器停了也不会消失，照常成交。
-- 本地账本 `data/gridbot.sqlite` 记录网格状态。它**不在 git 里**（含交易数据，刻意不提交）。
-- 新机器没有账本，通过 `gridbot recover` 用 API key 从 OKX 订单历史**完整重建**账本：每张挂单、已成交的往返、利润、现金、持币。重建只读不写，不会下单也不会撤单。
-- 重建依赖 OKX 最近 7 天的订单历史。**旧机器停机后 7 天内必须完成迁移**，否则 recover 会失败，只能从旧机器拷贝账本文件。
+- 本地账本 `data/gridbot.sqlite` 记录所有状态。它**不在 git 里**（含交易数据，刻意不提交）。
+- 没有账本的新机器，用 `gridbot recover` 从 OKX 订单历史**完整重建**网格账本。重建只读不写，依赖 OKX 最近 7 天的订单历史，所以**旧机器停机后 7 天内必须完成迁移**（旧机器 Mac 于 2026-09-30 约 12:00 UTC 停机）。
 
-### 当前状态（2026-09-30 写入，迁移完成后此节即过时）
+### 时间线
 
-| 网格 | 网格 ID | 资金 | 格距 | 创建时间 UTC |
-|---|---|---|---|---|
-| BTC-USDT | D8D9828B | 50 USDT | 0.3% | 2026-09-30 07:24 |
-| ETH-USDT | 7108B989 | 25 USDT | 0.6% | 2026-09-30 09:46 |
-| SOL-USDT | CBE2719D | 25 USDT | 0.6% | 2026-09-30 09:46 |
+| 时间（UTC） | 事件 |
+|---|---|
+| 2026-09-30 07:24 | BTC 验证网格创建（D8D9828B，50 USDT，格距 0.3%） |
+| 2026-09-30 09:46 | ETH、SOL 验证网格创建（7108B989、CBE2719D，各 25 USDT，格距 0.6%） |
+| 2026-09-30 约 12:00 | 旧机器 Mac 停机，网格挂单留在 OKX 上 |
+| 2026-10-01 09:46 之后 | 可以运行 `check` 验收三个网格 |
+| 验收通过 + 用户确认后 | 切换到趋势策略 |
+| 2026-10-07 约 12:00 | `recover` 的最后期限 |
 
-- 配置文件：`config/validate.toml`（`docker-compose.yml` 默认就用它）。
-- 旧机器（Mac）已于 2026-09-30 约 12:00 UTC 停止运行。
-- 账户里约 200 USDT 不属于任何网格（账户池）。
+账户里另有约 200 USDT 不属于任何网格（账户池），切换时会连同网格剩余的资金一起交给趋势策略。
 
 ## 铁律
 
@@ -32,7 +36,38 @@
 4. **对账失败导致 Halt 时，不要直接 `resume`。** 把日志里的 `problems` 原样告诉用户。
 5. **不要在这个 OKX 账户手动交易 BTC、ETH、SOL，不要充值或提现**，除非用户明确要求，并在之后执行 `gridbot rebaseline`。
 
-## 步骤
+## 第一步：判断当前阶段
+
+在仓库目录里运行（仓库还不存在就直接是阶段 A）：
+
+```sh
+docker ps --filter name=gridbot --format '{{.Names}} {{.Status}}'
+ls data/gridbot.sqlite 2>/dev/null
+grep command docker-compose.yml
+```
+
+| 看到的情况 | 阶段 | 执行 |
+|---|---|---|
+| 这台机器上还没有仓库，或没有 `data/gridbot.sqlite` | A：首次部署 | 下面「步骤」0 到 7，完成后网格在这台机器上运行 |
+| 容器在运行，`command` 里是 `validate.toml` 和 `start` | B：网格在运行 | 先做「更新代码」，再看是否已到验收时间 |
+| 容器在运行，`command` 里是 `trend.toml` 和 `trend-run` | C：趋势策略在运行 | 只需要「更新代码」和「日常操作」 |
+
+### 更新代码（阶段 B、C）
+
+```sh
+git pull
+docker compose up -d --build
+sleep 30
+docker compose logs --tail 40
+```
+
+重建镜像会重启容器，这是安全的：挂单和持仓都在 OKX 上，账本在 `data/` 里，进程启动时会先对账并补上停机期间的成交。
+
+**预期：** 阶段 B 出现三行 `resuming (active)` 和 `reconcile (startup) ok`；阶段 C 出现 `[trend ...] resuming` 和 `reconcile (startup) ok`。
+
+阶段 B 更新完后：如果当前时间已过 2026-10-01 09:46 UTC，执行「验收」，通过后按「从网格切换到趋势策略」操作；还没到就告诉用户验收时间，然后结束。
+
+## 步骤（阶段 A：首次部署）
 
 ### 0. 确认前提
 
@@ -156,7 +191,9 @@ docker exec gridbot gridbot -c config/validate.toml status
 
 把这段输出摘要告诉用户：三个网格的状态、已完成往返次数、已实现利润。
 
-## 日常操作
+阶段 A 到此完成。接下来和阶段 B 一样：如果当前时间已过 2026-10-01 09:46 UTC，执行「验收」；还没到就告诉用户验收时间，然后结束。
+
+## 日常操作（网格阶段）
 
 | 目的 | 命令 |
 |---|---|
@@ -222,5 +259,31 @@ docker compose logs --tail 40
 
 ## 再次迁移到别的机器
 
+**同一时间只能有一台机器运行。** 无论哪种策略，都是先停旧机器，再在新机器上启动。
+
+### 迁移网格（还没切换到趋势策略时）
+
 1. 在旧机器上：`docker compose down`。
-2. 在新机器上从本文档第 0 步开始。7 天内完成即可，无需拷贝任何文件。
+2. 在新机器上按「步骤（阶段 A）」从第 0 步开始。7 天内完成即可，无需拷贝任何文件。
+
+### 迁移趋势策略（已切换之后）
+
+趋势策略的全部状态就是账户里的 USDT 和币，新机器上不需要重建。空账本启动时，它会把账户里的全部 USDT、BTC、ETH、SOL 接收为自己的持仓，然后照常每天调仓。
+
+1. 在旧机器上：`docker compose down`。
+2. 在新机器上按阶段 A 的第 0 到 3 步准备代码、`.env` 并构建镜像。
+3. 把 `docker-compose.yml` 的命令改成趋势策略，预览，然后启动：
+
+```sh
+sed -i 's#"--config", "config/[a-z]*.toml", "start"#"--config", "config/trend.toml", "trend-run"#' docker-compose.yml   # macOS: sed -i ''
+docker compose run --rm gridbot gridbot -c config/trend.toml trend-plan
+docker compose up -d
+sleep 30
+docker compose logs --tail 40
+```
+
+**预期：** `trend-plan` 显示 `hypothetical book` 的现金和持仓与 OKX 账户一致；启动后出现 `[trend ...] created with ...` 和 `reconcile (startup) ok`。
+
+代价是旧机器上的决策记录和盈亏基准不会带过来，新账本从迁移这一刻重新计算盈亏。
+
+**不要在迁移后的新机器上运行 `recover` 或 `start`**，那是网格用的。

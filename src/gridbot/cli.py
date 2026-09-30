@@ -248,7 +248,8 @@ def cmd_doctor(cfg: Config) -> None:
         elif known:
             print("NEXT: ledger matches; start the runner")
         else:
-            print(f"NEXT: no grids anywhere; start will create new ones (needs {sum(g.capital_quote for g in cfg.grids)} {quote} free)")
+            print("NEXT: no grid orders on OKX and no grids in the ledger. If the Trend Strategy runs on this account, follow"
+                  " DEPLOY.md 'migrate the Trend Strategy'. Do not run `start` without asking the user: it would create new grids.")
         return 0
 
     code = asyncio.run(main())
