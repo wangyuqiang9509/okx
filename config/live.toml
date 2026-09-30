@@ -1,0 +1,14 @@
+# Production grid: 500 USDT, ±8% / 1%, ~16 levels. Promote here only after `gridbot check` passes on validate.
+[grid]
+inst_id = "BTC-USDT"
+capital_quote = 500
+spacing_pct = 1.0
+levels_below = 8
+levels_above = 8
+seed_slippage_pct = 0.1
+
+[runtime]
+ledger_path = "data/gridbot.sqlite"
+log_dir = "data/logs"
+reconcile_interval_s = 3600
+snapshot_interval_s = 300

@@ -1,0 +1,10 @@
+services:
+  gridbot:
+    build: .
+    container_name: gridbot
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    restart: unless-stopped
+    command: ["gridbot", "--config", "config/validate.toml", "start"]

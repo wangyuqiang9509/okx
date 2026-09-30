@@ -1,0 +1,14 @@
+# Day-1 validation grid: 50 USDT, dense ±3% / 0.3%. Purpose is to exercise code paths, not profit.
+[grid]
+inst_id = "BTC-USDT"
+capital_quote = 50
+spacing_pct = 0.3
+levels_below = 10
+levels_above = 10
+seed_slippage_pct = 0.1
+
+[runtime]
+ledger_path = "data/gridbot.sqlite"
+log_dir = "data/logs"
+reconcile_interval_s = 3600
+snapshot_interval_s = 300

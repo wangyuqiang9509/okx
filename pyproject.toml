@@ -1,0 +1,29 @@
+[project]
+name = "gridbot"
+version = "0.1.0"
+description = "Fixed-range spot grid bot for OKX BTC-USDT"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "websockets>=12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "mypy>=1.10"]
+
+[project.scripts]
+gridbot = "gridbot.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
