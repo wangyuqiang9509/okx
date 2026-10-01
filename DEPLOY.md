@@ -65,7 +65,7 @@ docker compose logs --tail 40
 
 **预期：** 阶段 B 出现三行 `resuming (active)` 和 `reconcile (startup) ok`；阶段 C 出现 `[trend ...] resuming` 和 `reconcile (startup) ok`。
 
-阶段 B 更新完后：如果当前时间已过 2026-10-01 09:46 UTC，执行「验收」，通过后按「从网格切换到趋势策略」操作；还没到就告诉用户验收时间，然后结束。
+阶段 B 更新完后：如果用户要求立即切换，直接按「从网格切换到趋势策略」操作；否则如果当前时间已过 2026-10-01 09:46 UTC，执行「验收」，通过后再切换；还没到就告诉用户验收时间，然后结束。
 
 ## 步骤（阶段 A：首次部署）
 
@@ -221,7 +221,13 @@ docker exec gridbot gridbot -c config/validate.toml check
 
 用户已决定（见 `docs/adr/0004-trend-strategy-replaces-grid.md`）：网格验收通过后停掉，全部资金交给趋势策略，目标波动率 40%。
 
-**前提：** `check` 已全部 `pass`，并且**向用户确认过**现在切换。
+**前提（满足其一）：**
+- `check` 已全部 `pass`，并且**向用户确认过**现在切换；或者
+- 用户明确要求不等验收直接切换（2026-10-01 用户已提出这一要求，理由是执行层已有足够实盘证据：73 笔成交，`recover` 重建的挂单与交易所完全一致）。这时先运行 `status`，确认三个网格都是 `active`、最近一次对账 `ok=True`，再继续。有 `HALT` 或对账失败就停下来告诉用户。
+
+```sh
+docker exec gridbot gridbot -c config/validate.toml status
+```
 
 ```sh
 # 1. 停掉网格进程，撤掉全部网格单并关闭网格（持有的币留在账户池里，不卖）
