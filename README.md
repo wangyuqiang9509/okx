@@ -1,6 +1,6 @@
 # OKX Quant Bot
 
-Long-only spot strategies on OKX for BTC, ETH and SOL against USDT: a daily Trend Strategy (main, see ADR-0004) and fixed-range grids. One strategy runs on the account at a time. Vocabulary in `CONTEXT.md`, decisions in `docs/adr/`.
+Long-only spot strategies on OKX for BTC, ETH and SOL against USDT: a Spot Martingale on SOL (what runs while capital is small, see ADR-0005), a daily Trend Strategy (for when capital is large, see ADR-0004) and fixed-range grids. One strategy runs on the account at a time. Vocabulary in `CONTEXT.md`, decisions in `docs/adr/`.
 
 **Moving to or setting up a machine: follow [DEPLOY.md](DEPLOY.md).** It is written so an AI agent can run it end to end; the only manual step is filling `.env`.
 
@@ -38,6 +38,17 @@ All take `--config` (default `config/validate.toml`). Most take `--inst ETH-USDT
 | `gridbot trend-halt` / `trend-resume` | stop / restart rebalancing; holdings stay |
 | `gridbot trend-close` | close the Book and hand everything to the account pool; sells nothing |
 | `gridbot trend-backtest [--years N]` | the live rebalancing rule on `data/candles/*-1D.csv` (`python research/fetch_1d.py`) |
+
+### Spot Martingale (`-c config/martingale.toml`)
+
+| command | what it does |
+|---|---|
+| `gridbot mart-plan` | the whole Ladder at today's price for the Book's (or the pool's) cash; places nothing |
+| `gridbot mart-run` | create the Book from the account pool's USDT (or resume it) and run Cycles, polling every 5s |
+| `gridbot mart-status` | cash, holding, average cost, add count, resting orders, cycles, realised profit, reconciliation |
+| `gridbot mart-halt` / `mart-resume` | stop / restart placing orders; resting orders and holdings stay |
+| `gridbot mart-close` | cancel the Ladder's resting orders and hand everything to the account pool; sells nothing |
+| `gridbot sell-pool BTC\|ETH\|SOL` | sell what the account pool holds of that coin for USDT (IOC), when switching strategies |
 
 ### Grids
 

@@ -91,6 +91,9 @@ class FakeExchange:
                 out.append(PlaceResult(fo.cl_ord_id, "", False, "51124", "post_only would cross"))
                 continue
             self.orders[fo.cl_ord_id] = fo
+            crossed = (fo.side == "buy" and fo.px >= last) or (fo.side == "sell" and fo.px <= last)
+            if o["ordType"] == "limit" and crossed:  # a plain limit that crosses takes liquidity at once
+                self._fill(fo, last, TAKER)
             if o["ordType"] == "ioc":
                 self._fill(fo, last, TAKER)
                 if fo.state != "filled":

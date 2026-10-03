@@ -1,0 +1,19 @@
+# Spot Martingale on SOL: step 1%, x2, 6 adds, take-profit 0.8%, profits compound, no refills.
+# See research/2026-10-03-martingale-refill.md and docs/adr/0005-martingale-for-small-capital.md.
+# Backtest without refills (2022-10..2026-09): after 12 months median 1.13x, 39% doubled, 20% lost over half.
+
+[runtime]
+ledger_path = "data/gridbot.sqlite"
+log_dir = "data/logs"
+reconcile_interval_s = 3600
+snapshot_interval_s = 300
+
+[martingale]
+inst_id = "SOL-USDT"         # only BTC-USDT, ETH-USDT, SOL-USDT are accepted
+capital_quote = "all"        # USDT taken from the account pool at creation; a number takes that much
+step_pct = 1                 # each Add rests this far below the last Level
+mult = 2                     # each Add buys this many times the previous one
+adds = 6                     # after this many Adds the Ladder is Stuck and only waits for the Take-Profit
+take_profit_pct = 0.8        # sell everything at average cost * (1 + this)
+slippage_pct = 0.1           # Opening Buy IOC price = ask * (1 + this)
+poll_interval_s = 5

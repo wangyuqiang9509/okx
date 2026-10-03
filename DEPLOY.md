@@ -10,7 +10,8 @@
 - 有两种策略，**同一账户同一时间只运行一种**，程序会强制检查：
   - **网格**（`config/validate.toml`，命令 `start`）：目前在跑的三个小额验证网格，用来验证下单和对账在实盘上可靠。
   - **趋势策略**（`config/trend.toml`，命令 `trend-run`）：主策略，每天 UTC 00:05 按趋势和波动率调仓，见 `docs/adr/0004-trend-strategy-replaces-grid.md`。
-- 用户已经决定的路线：网格跑满 24 小时并通过 `check` 验收后停掉，全部资金交给趋势策略，目标波动率 40%。**切换前必须让用户看过 `trend-plan` 的输出并确认。**
+- **2026-10-03 起的路线**（`docs/adr/0005-martingale-for-small-capital.md`）：小资金阶段只跑现货倍投（`config/martingale.toml`，命令 `mart-run`，SOL）。不论服务器上现在是网格还是趋势策略，都按「切换到现货倍投」停掉并换过去。**切换前必须让用户看过 `mart-plan` 的输出并确认。** 趋势策略留到资金量大时再用。
+- 之前的路线（已被上一条取代）：网格验收通过后全部资金交给趋势策略，目标波动率 40%。
 - 网格的挂单**一直挂在 OKX 上**，机器停了也不会消失，照常成交。
 - 本地账本 `data/gridbot.sqlite` 记录所有状态。它**不在 git 里**（含交易数据，刻意不提交）。
 - 没有账本的新机器，用 `gridbot recover` 从 OKX 订单历史**完整重建**网格账本。重建只读不写，依赖 OKX 最近 7 天的订单历史，所以**旧机器停机后 7 天内必须完成迁移**（旧机器 Mac 于 2026-09-30 约 12:00 UTC 停机）。
@@ -50,7 +51,8 @@ grep command docker-compose.yml
 |---|---|---|
 | 这台机器上还没有仓库，或没有 `data/gridbot.sqlite` | A：首次部署 | 下面「步骤」0 到 7，完成后网格在这台机器上运行 |
 | 容器在运行，`command` 里是 `validate.toml` 和 `start` | B：网格在运行 | 先做「更新代码」，再看是否已到验收时间 |
-| 容器在运行，`command` 里是 `trend.toml` 和 `trend-run` | C：趋势策略在运行 | 只需要「更新代码」和「日常操作」 |
+| 容器在运行，`command` 里是 `trend.toml` 和 `trend-run` | C：趋势策略在运行 | 先做「更新代码」，再按「切换到现货倍投」 |
+| 容器在运行，`command` 里是 `martingale.toml` 和 `mart-run` | D：现货倍投在运行 | 只需要「更新代码」和倍投的日常命令 |
 
 ### 更新代码（阶段 B、C）
 
@@ -63,9 +65,9 @@ docker compose logs --tail 40
 
 重建镜像会重启容器，这是安全的：挂单和持仓都在 OKX 上，账本在 `data/` 里，进程启动时会先对账并补上停机期间的成交。
 
-**预期：** 阶段 B 出现三行 `resuming (active)` 和 `reconcile (startup) ok`；阶段 C 出现 `[trend ...] resuming` 和 `reconcile (startup) ok`。
+**预期：** 阶段 B 出现三行 `resuming (active)` 和 `reconcile (startup) ok`；阶段 C 出现 `[trend ...] resuming` 和 `reconcile (startup) ok`；阶段 D 出现 `[mart ...] resuming` 和 `reconcile (startup) ok`。
 
-阶段 B 更新完后：如果用户要求立即切换，直接按「从网格切换到趋势策略」操作；否则如果当前时间已过 2026-10-01 09:46 UTC，执行「验收」，通过后再切换；还没到就告诉用户验收时间，然后结束。
+阶段 B、C 更新完后：按「切换到现货倍投」操作。
 
 ## 步骤（阶段 A：首次部署）
 
@@ -263,6 +265,59 @@ docker compose logs --tail 40
 
 对账失败会自动暂停调仓，处理方式同铁律 4。
 
+## 切换到现货倍投
+
+用户已决定（`docs/adr/0005-martingale-for-small-capital.md`）：停掉当前策略，把账户里的币全部卖成 USDT，全部 USDT 交给 SOL 现货倍投。
+
+先确认当前状态正常（有 `HALT` 或对账失败就停下来告诉用户）：
+
+```sh
+docker exec gridbot gridbot -c config/validate.toml status      # 阶段 B
+docker exec gridbot gridbot -c config/trend.toml trend-status   # 阶段 C
+```
+
+```sh
+# 1. 停掉当前进程，关闭当前策略（都不卖币，币和 USDT 回到账户池）
+docker compose down
+docker compose run --rm gridbot gridbot -c config/validate.toml cancel-all   # 阶段 B：撤网格单并关闭网格
+docker compose run --rm gridbot gridbot -c config/trend.toml trend-close     # 阶段 C：关闭趋势 Book
+
+# 2. 看账户池里有什么，把 BTC、ETH、SOL 全部卖成 USDT（低于最小下单量的零头会跳过）
+docker compose run --rm gridbot gridbot -c config/martingale.toml mart-plan
+docker compose run --rm gridbot gridbot -c config/martingale.toml sell-pool BTC
+docker compose run --rm gridbot gridbot -c config/martingale.toml sell-pool ETH
+docker compose run --rm gridbot gridbot -c config/martingale.toml sell-pool SOL
+
+# 3. 预览整架梯子（只读，不下单）
+docker compose run --rm gridbot gridbot -c config/martingale.toml mart-plan
+```
+
+**预期：** `mart-plan` 显示 `cash ... USDT (no book yet; from the account pool)` 和 7 行梯子（0 到 6），每行都没有 `BELOW MINIMUM ORDER`，最后一行说明跌多少后被套。把这段输出给用户看，**用户确认后**再继续。有 `BELOW MINIMUM ORDER` 说明现金太少，停下来告诉用户。
+
+```sh
+# 4. 把容器的命令换成现货倍投并启动
+sed -i 's#"--config", "config/[a-z]*.toml", "[a-z-]*"\]#"--config", "config/martingale.toml", "mart-run"]#' docker-compose.yml   # macOS: sed -i ''
+grep command docker-compose.yml
+docker compose up -d
+sleep 30
+docker compose logs --tail 40
+```
+
+**预期：** `grep` 显示 `config/martingale.toml` 和 `mart-run`。日志里依次出现：`created on SOL-USDT with ... USDT`、`reconcile (startup) ok`、`placed open buy`、`cycle 1 opened at ...`、`placed tp sell`、`placed add buy`。
+
+日常命令：
+
+| 目的 | 命令 |
+|---|---|
+| 看状态、梯子和挂单 | `docker exec gridbot gridbot -c config/martingale.toml mart-status` |
+| 看整架梯子在今天价格下的位置（只读） | `docker exec gridbot gridbot -c config/martingale.toml mart-plan` |
+| 实时日志 | `docker compose logs -f` |
+| 暂停（挂单和持币不动） | `docker exec gridbot gridbot -c config/martingale.toml mart-halt` |
+| 恢复 | `docker exec gridbot gridbot -c config/martingale.toml mart-resume` |
+| 结束倍投（撤挂单，持币不卖，回到账户池） | `docker exec gridbot gridbot -c config/martingale.toml mart-close`，然后 `docker compose down` |
+
+对账失败会自动暂停，处理方式同铁律 4。被套（`mart-status` 显示 `STUCK`）是策略的正常状态，不是故障，不要手动干预。
+
 ## 再次迁移到别的机器
 
 **同一时间只能有一台机器运行。** 无论哪种策略，都是先停旧机器，再在新机器上启动。
@@ -293,3 +348,15 @@ docker compose logs --tail 40
 代价是旧机器上的决策记录和盈亏基准不会带过来，新账本从迁移这一刻重新计算盈亏。
 
 **不要在迁移后的新机器上运行 `recover` 或 `start`**，那是网格用的。
+
+### 迁移现货倍投
+
+倍投的梯子状态（第几次加仓、平均成本、挂着的两张单）只在账本里，OKX 上看不出来，所以必须把账本带过去。
+
+1. 在旧机器上：`docker compose down`。
+2. 把旧机器的 `data/gridbot.sqlite` 用 `scp` 拷到新机器仓库的 `data/` 下（不要提交到 git）。
+3. 在新机器上按阶段 A 的第 0 到 3 步准备代码、`.env` 并构建镜像，把 `docker-compose.yml` 的命令改成 `mart-run`（同上一节第 4 步），然后 `docker compose up -d`。
+
+**预期：** 日志里出现 `[mart ...] resuming (active)` 和 `reconcile (startup) ok`。
+
+拷不过去账本时：在旧机器上先运行 `mart-close`（撤单，持币回到账户池），新机器空账本启动后会只拿 USDT 开新梯子，持有的 SOL 留在账户池，是否卖出问用户。新机器发现 OKX 上有不认识的倍投挂单会拒绝启动。

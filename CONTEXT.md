@@ -1,6 +1,6 @@
 # OKX Quant Bot
 
-一个自用的、在 OKX 现货上交易 BTC、ETH、SOL（均以 USDT 计价）的量化机器人，只做多。有两种 Strategy：Trend Strategy（主策略，每天按趋势和波动率调仓）和 Grid（固定区间网格，保留在代码中）。同一账户同一时间只运行其中一种。
+一个自用的、在 OKX 现货上交易 BTC、ETH、SOL（均以 USDT 计价）的量化机器人，只做多。有三种 Strategy：Spot Martingale（小资金阶段在跑的激进策略，见 ADR-0005）、Trend Strategy（资金量大后的主策略，每天按趋势和波动率调仓）和 Grid（固定区间网格，保留在代码中）。同一账户同一时间只运行其中一种。
 
 ## Language
 
@@ -21,7 +21,7 @@ _Avoid_: bot, robot, algo, 机器人
 _Avoid_: CTA, 趋势机器人, trend bot
 
 **Book（账簿）**:
-Trend Strategy 名下的 USDT 与各币持仓。创建时从 Account Pool 划入，关闭时全部归还给 Account Pool，关闭本身不做任何交易。
+Trend Strategy 或 Spot Martingale 名下的 USDT 与币持仓。创建时从 Account Pool 划入，关闭时全部归还给 Account Pool，关闭本身不做任何交易。
 _Avoid_: portfolio, account, 账户, 组合
 
 **Sleeve（分仓）**:
@@ -47,6 +47,36 @@ _Avoid_: sync, 再平衡, 调整
 **Decision（决策记录）**:
 每次 Rebalance 为每个 Instrument 记下的六票、波动率、Weight、目标价值、当前价值和实际动作，是事后复盘的依据。
 _Avoid_: log, signal history, 日志
+
+### 现货倍投
+
+**Spot Martingale（现货倍投）**:
+在一个 Instrument 上反复运行 Cycle 的 Strategy：越跌越加倍买入，均价上涨一定比例时全部卖出。只用 Book 里的现金，不加杠杆，不追加资金。
+_Avoid_: 马丁, martingale bot, DCA
+
+**Ladder（梯子）**:
+一个 Cycle 里按 Level 排开的全部买入：一笔 Opening Buy 加最多 adds 笔 Add，每笔是上一笔的 mult 倍。大小按 Book 现金算好，整架梯子正好花完全部现金。
+_Avoid_: grid, 网格, 补仓计划
+
+**Cycle（一轮）**:
+从 Opening Buy 到 Take-Profit 全部成交的一次完整过程。结束时的利润留在 Book 里，下一轮按新的现金重新计算 Ladder。
+_Avoid_: round, trade, 一单
+
+**Opening Buy（首单）**:
+每个 Cycle 开头按市价附近 IOC 买入的第一笔，是 Ladder 的第一个 Level。
+_Avoid_: 底仓, Seed Buy
+
+**Add（加仓）**:
+价格比上一个 Level 低 step 时成交的买单，常驻在订单簿上，同一时刻至多一张。
+_Avoid_: 补仓, DCA order
+
+**Take-Profit（止盈单）**:
+卖出全部持币的那张限价单，价格是平均成本 ×（1 + tp）。每次 Add 成交后撤掉并按新的数量和均价重挂。
+_Avoid_: TP, 止盈位, 卖单
+
+**Stuck（被套）**:
+全部 Add 都已成交、只剩 Take-Profit 在等的状态。此时不再买入，也没有收入，直到价格回到止盈价。
+_Avoid_: 爆仓, 满仓, liquidated
 
 ### 网格
 

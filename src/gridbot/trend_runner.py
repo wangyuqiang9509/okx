@@ -95,6 +95,9 @@ class TrendRunner:
             self.insts[i] = await self.rest.instrument(i)
         if self.ledger.open_grids():
             raise SystemExit("grids are still open in the ledger; close them first (`gridbot -c config/validate.toml cancel-all`)")
+        others = [r["kind"] for r in self.ledger.open_books() if r["kind"] != KIND]
+        if others:
+            raise SystemExit(f"a {others[0]} book is open; close it first (e.g. `gridbot -c config/martingale.toml mart-close`)")
         row = self.ledger.open_book(KIND)
         if row is not None:
             self.book = BookState.from_dict(json.loads(row["state_json"]))

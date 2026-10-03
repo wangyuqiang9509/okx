@@ -12,14 +12,14 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from .config import Config, TrendConfig, load_config, load_credentials, load_trend_config
+from .config import Config, MartingaleConfig, TrendConfig, load_config, load_credentials, load_martingale_config, load_trend_config
 from .engine import GridEngine
 from .ledger import Ledger, now_ms
 
 DAY_MS = 86_400_000
 
 
-def setup_logging(cfg: Config | TrendConfig) -> None:
+def setup_logging(cfg: Config | TrendConfig | MartingaleConfig) -> None:
     cfg.runtime.log_dir.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     root = logging.getLogger()
@@ -467,6 +467,182 @@ def cmd_trend_backtest(tc: TrendConfig, years: float) -> None:
     print("by year: " + ", ".join(f"{y} {b / a - 1:+.0%}" for y, (a, b) in by.items()))
 
 
+# ----- martingale --------------------------------------------------------------------------
+def cmd_mart_run(mc: MartingaleConfig) -> None:
+    from .martingale_runner import MartingaleRunner
+    from .okx import OkxRest
+
+    setup_logging(mc)
+    creds = load_credentials()
+
+    async def main() -> None:
+        rest = OkxRest(creds)
+        ledger = Ledger(mc.runtime.ledger_path)
+        try:
+            await MartingaleRunner(mc, ledger, rest).run()
+        finally:
+            await rest.close()
+            ledger.close()
+
+    asyncio.run(main())
+
+
+def cmd_mart_plan(mc: MartingaleConfig) -> None:
+    """The whole Ladder at today's price for the cash the Book has (or would get). Places nothing."""
+    from .martingale import FEE_PAD, Params, floor_to
+    from .martingale_runner import KIND
+    from .okx import OkxRest
+
+    ledger = Ledger(mc.runtime.ledger_path)
+    row = ledger.open_book(KIND)
+    cash = D(json.loads(row["state_json"])["cash"]) if row else (ledger.pool().get(mc.quote_ccy, D(0)) if mc.capital_quote is None else mc.capital_quote)
+    p = Params(mc.step, mc.mult, mc.adds, mc.take_profit)
+
+    async def main() -> None:
+        rest = OkxRest(None)
+        try:
+            inst = await rest.instrument(mc.inst_id)
+            px = (await rest.ticker(mc.inst_id)).ask
+        finally:
+            await rest.close()
+        base = cash / p.ladder_units()
+        print(f"{mc.inst_id} at {px}, cash {cash:.2f} {mc.quote_ccy}{'' if row else ' (no book yet; from the account pool)'}")
+        print(f"{'level':>5} {'price':>10} {'drop':>6} {'buy quote':>10} {'qty':>12} {'total spent':>11} {'avg cost':>10} {'take-profit':>11}")
+        spent = qty = D(0)
+        level = px
+        for k in range(p.adds + 1):
+            if k:
+                level = level * (1 - p.step)
+            size = base * p.mult ** k
+            q = floor_to(min(size, (cash - spent) / FEE_PAD) / level, inst.lot_sz)
+            ok = "" if q >= inst.min_sz else "  BELOW MINIMUM ORDER"
+            spent += q * level
+            qty += q
+            avg = spent / qty if qty else D(0)
+            print(f"{k:>5} {level:>10.2f} {float(1 - level / px):>6.1%} {size:>10.2f} {q:>12} {spent:>11.2f} {avg:>10.2f} {avg * (1 + p.tp):>11.2f}{ok}")
+        print(f"ladder is Stuck below {level:.2f} ({float(1 - level / px):.1%} under today's price); it then holds and waits")
+
+    asyncio.run(main())
+
+
+def cmd_mart_status(mc: MartingaleConfig) -> None:
+    from .martingale import LadderState
+    from .martingale_runner import KIND
+
+    ledger = Ledger(mc.runtime.ledger_path)
+    row = ledger.open_book(KIND)
+    if row is None:
+        raise SystemExit("no open martingale book")
+    s = LadderState.from_dict(json.loads(row["state_json"]))
+    snap = ledger.last_snapshot(s.book_id)
+    print(f"martingale book {s.book_id} on {s.inst_id}  {row['status']} {row['halt_reason'] or ''}  created {_ts(row['created_ms'])}")
+    print(f"cash {s.cash:.4f} {s.quote_ccy}  holding {s.qty} {s.base_ccy}  avg cost {s.avg_cost():.4f}  add {s.n_add}/{mc.adds}"
+          f"{'  STUCK' if s.in_cycle and s.n_add >= mc.adds else ''}")
+    print(f"capital in {s.capital_in:.2f}  cycles {s.cycles}  realised {s.realised:+.4f}  fees {s.fees_quote:.4f}")
+    for o in s.orders.values():
+        print(f"  resting {o.role:4} {o.side:4} {o.sz} @ {o.px}  ({o.cl_ord_id}, filled {o.applied_sz})")
+    if snap:
+        print(f"last snapshot {_ts(snap['ts_ms'])}: px {snap['last_px']} equity {D(snap['equity']):.2f}  pnl {D(snap['realised']):+.2f}")
+    recs = ledger.events_since(s.book_id, now_ms() - DAY_MS, "reconcile")
+    if recs:
+        last = json.loads(recs[-1]["detail_json"])
+        print(f"reconcile last 24h: {len(recs)} runs, last ok={last.get('ok')} {last.get('problem', '')}")
+    print("account pool: " + ", ".join(f"{v} {k}" for k, v in sorted(ledger.pool().items())))
+
+
+def cmd_mart_set(mc: MartingaleConfig, status: str) -> None:
+    from .martingale_runner import KIND
+
+    ledger = Ledger(mc.runtime.ledger_path)
+    row = ledger.open_book(KIND)
+    if row is None:
+        raise SystemExit("no open martingale book")
+    ledger.set_book_status(row["id"], status, "manual" if status == "halted" else "")
+    print(f"book {row['id']} -> {status} (runner picks it up within {mc.poll_interval_s:.0f}s)")
+
+
+def cmd_mart_close(mc: MartingaleConfig) -> None:
+    """Halt, cancel the Book's resting orders, apply their last fills, then hand cash and coins to the pool. Sells nothing."""
+    from .martingale import LadderState
+    from .martingale_runner import KIND, MartingaleRunner
+    from .okx import OkxRest
+
+    creds = load_credentials()
+    ledger = Ledger(mc.runtime.ledger_path)
+    row = ledger.open_book(KIND)
+    if row is None:
+        raise SystemExit("no open martingale book")
+    if row["status"] != "halted":
+        ledger.set_book_status(row["id"], "halted", "closing")
+        wait = 2 * mc.poll_interval_s + 2
+        print(f"halted; waiting {wait:.0f}s for the runner to notice")
+        time.sleep(wait)
+
+    async def main() -> None:
+        rest = OkxRest(creds)
+        try:
+            r = MartingaleRunner(mc, ledger, rest)
+            r.inst = await rest.instrument(mc.inst_id)
+            r.s = LadderState.from_dict(json.loads(ledger.open_book(KIND)["state_json"]))  # type: ignore[index]
+            for o in list(r.s.orders.values()):
+                await r._cancel(o)
+                print(f"cancelled {o.role} {o.cl_ord_id}")
+        finally:
+            await rest.close()
+
+    asyncio.run(main())
+    rel = ledger.close_book(row["id"], "manual")
+    print(f"book {row['id']} closed; released to the account pool (nothing was sold): " + ", ".join(f"{v} {k}" for k, v in rel.items()))
+    print("the running process idles; stop it before starting anything else on this account")
+
+
+def cmd_sell_pool(mc: MartingaleConfig, ccy: str) -> None:
+    """Sell every coin of `ccy` the Account Pool holds for USDT (IOC). Used when switching strategies."""
+    from .martingale import floor_to
+    from .okx import OkxRest
+
+    if ccy not in ("BTC", "ETH", "SOL"):
+        raise SystemExit("only BTC, ETH or SOL")
+    creds = load_credentials()
+    ledger = Ledger(mc.runtime.ledger_path)
+    inst_id = f"{ccy}-{mc.quote_ccy}"
+    amount = ledger.pool().get(ccy, D(0))
+
+    async def main() -> None:
+        rest = OkxRest(creds)
+        try:
+            inst = await rest.instrument(inst_id)
+            qty = floor_to(amount, inst.lot_sz)
+            if qty < inst.min_sz:
+                print(f"pool holds {amount} {ccy}, below the minimum order; nothing to sell")
+                return
+            t = await rest.ticker(inst_id)
+            px = floor_to(t.bid * (1 - mc.slippage), inst.tick_sz)
+            cl = f"P{ccy}{int(time.time())}"
+            (res,) = await rest.place_orders(inst_id, [{"side": "sell", "ordType": "ioc", "px": str(px), "sz": str(qty), "clOrdId": cl}])
+            if not res.ok:
+                raise SystemExit(f"rejected: {res.code} {res.msg}")
+            snap = None
+            for _ in range(20):
+                await asyncio.sleep(0.5)
+                snap = await rest.order(inst_id, cl)
+                if snap is not None and snap.state in ("filled", "canceled", "mmp_canceled"):
+                    break
+            if snap is None or snap.acc_fill_sz <= 0:
+                print("no fill; pool unchanged")
+                return
+            fee_base = snap.fee if snap.fee_ccy == ccy else D(0)
+            fee_quote = snap.fee if snap.fee_ccy == mc.quote_ccy else D(0)
+            ledger.pool_add(ccy, -(snap.acc_fill_sz - fee_base))
+            ledger.pool_add(mc.quote_ccy, snap.acc_fill_sz * snap.avg_px + fee_quote)
+            ledger.event("pool", "pool_sell", {"cl_ord_id": cl, "ccy": ccy, "qty": str(snap.acc_fill_sz), "avg_px": str(snap.avg_px), "fee": str(snap.fee)})
+            print(f"sold {snap.acc_fill_sz} {ccy} @ {snap.avg_px}; pool now " + ", ".join(f"{v} {k}" for k, v in sorted(ledger.pool().items())))
+        finally:
+            await rest.close()
+
+    asyncio.run(main())
+
+
 def _ts(ms: int) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ms / 1000)) + "Z"
 
@@ -501,7 +677,33 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("trend-close", help="close the Trend Book and hand its cash and coins to the account pool; sells nothing")
     bt = sub.add_parser("trend-backtest", help="backtest the live rebalancing rule on data/candles/*-1D.csv")
     bt.add_argument("--years", type=float, default=0, help="only the last N years (default: all)")
+    sub.add_parser("mart-run", help="run the Spot Martingale (use -c config/martingale.toml)")
+    sub.add_parser("mart-plan", help="show the whole ladder at today's price; places nothing")
+    sub.add_parser("mart-status", help="show the Martingale Book, ladder and reconciliation")
+    sub.add_parser("mart-halt", help="stop placing orders; resting orders and holdings stay")
+    sub.add_parser("mart-resume", help="lift a martingale halt")
+    sub.add_parser("mart-close", help="cancel the ladder's resting orders and close the book; sells nothing")
+    sp = sub.add_parser("sell-pool", help="sell every BTC, ETH or SOL the account pool holds for USDT (use -c config/martingale.toml)")
+    sp.add_argument("ccy", choices=["BTC", "ETH", "SOL"])
     a = p.parse_args(argv)
+    if a.cmd.startswith("mart-") or a.cmd == "sell-pool":
+        mc = load_martingale_config(a.config)
+        match a.cmd:
+            case "mart-run":
+                cmd_mart_run(mc)
+            case "mart-plan":
+                cmd_mart_plan(mc)
+            case "mart-status":
+                cmd_mart_status(mc)
+            case "mart-halt":
+                cmd_mart_set(mc, "halted")
+            case "mart-resume":
+                cmd_mart_set(mc, "active")
+            case "mart-close":
+                cmd_mart_close(mc)
+            case "sell-pool":
+                cmd_sell_pool(mc, a.ccy)
+        return
     if a.cmd.startswith("trend-"):
         tc = load_trend_config(a.config)
         match a.cmd:
